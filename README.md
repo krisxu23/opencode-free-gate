@@ -55,6 +55,118 @@ docker run -d \
 
 从 Bun 版本升级时，无需修改现有生产环境变量或 Caddy 路由，只需发布并拉取新的同名镜像。
 
+## 配合代理客户端使用（推荐）
+
+如果你已在使用 [mihomo](https://github.com/MetaCubeX/mihomo)（Clash Meta）等代理客户端，可以让网关流量通过客户端的节点池，获得更高质量的代理出口和自动故障转移能力。
+
+### 原理
+
+```
+opencode 客户端
+    ↓  http://localhost:13339/openai/v1
+opencode-free-gate.exe
+    ↓  socks5://127.0.0.1:7890（指向客户端混合端口）
+mihomo（Clash Meta）
+    ↓  按路由规则分组，节点间轮换/故障转移
+opencode.ai
+```
+
+### 步骤一：mihomo 中添加专属策略组
+
+在 `proxy-groups` 区域添加以下两个组（名称可自定义）：
+
+```yaml
+  # 网关专用策略组（手动选择 / 自动轮询）
+  - name: 'OpenCode网关'
+    type: select
+    proxies:
+      [
+        'OpenCode轮询',    # 默认项：自动在全部节点间轮换
+        '美国', '日本', '香港', '新加坡', '台湾省',
+        '自动选择',
+      ]
+    icon: 'https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Go.png'
+
+  # 轮询组：每个请求轮流换节点
+  - name: 'OpenCode轮询'
+    type: load-balance
+    strategy: round-robin
+    include-all: true
+    exclude-type: 'DIRECT'
+    url: 'https://g.cn/generate_204'
+    interval: 600
+    lazy: true
+```
+
+- `load-balance` + `round-robin` 会按请求轮流分配节点，天然适合轮询场景。
+- `include-all: true` 把所有订阅节点拉入池中；可通过 `filter` 正则排除不需要的节点。
+- `exclude-type: 'DIRECT'` 排除直连节点。
+
+### 步骤二：添加路由规则
+
+在 `rules:` 最上方（直连规则之后）添加，确保网关进程的流量命中该组：
+
+```yaml
+rules:
+  - RULE-SET,private,直连
+  - RULE-SET,private_ip,直连,no-resolve
+
+  # ↓ 新增：OpenCode 网关流量走专属组
+  - PROCESS-NAME,opencode-free-gate.exe,OpenCode网关
+  - DOMAIN-SUFFIX,opencode.ai,OpenCode网关
+
+  # ... 后续规则不变
+```
+
+两条规则互补：
+- `PROCESS-NAME` 按进程名匹配（需 `find-process-mode: strict`），最可靠。
+- `DOMAIN-SUFFIX` 按目标域名兜底，防止进程名匹配失效。
+
+### 步骤三：配置网关启动脚本
+
+在 bat 文件中添加以下环境变量，将网关代理入口指向 mihomo：
+
+```bat
+@echo off
+cd /d %~dp0
+
+rem ===== 必填：指向代理客户端混合端口 =====
+set CUSTOM_PROXIES=socks5://127.0.0.1:7890
+set PROXY_ORDER=custom
+
+rem ===== 超时设置（免费模型推理延迟波动大，建议适当放宽）=====
+set PROXY_FIRST_BYTE_TIMEOUT=30000
+set HARD_TIMEOUT=180000
+
+opencode-free-gate.exe
+pause
+```
+
+> `7890` 是 mihomo 默认混合端口。如果你使用其他客户端（如 v2rayN），端口可能是 `10808`；请以客户端实际配置为准。
+
+### 步骤四：验证
+
+1. 重启 mihomo（配置有改动需重启）
+2. 启动 bat，网关日志应出现：
+
+```
+[兜底] 1/1 custom proxies ready
+```
+
+3. 发送测试消息，日志中应出现 `[自定义]` 字样，而非 `[直连]`。
+4. 在 mihomo 面板（如 zashboard）的连接页查看，可以看到 `opencode-free-gate.exe` 的流量命中了 **OpenCode网关** 组。
+
+### 常见问题
+
+| 现象 | 原因 | 解决 |
+|---|---|---|
+| 日志显示 `[直连]` 而非 `[自定义]` | `CUSTOM_PROXIES` 未设置或端口错误 | 检查 bat 中的端口号是否与客户端一致 |
+| `[自定义]` 后反复超时 | 客户端节点全部不可用 | 在 mihomo 面板切换节点组或检查节点状态 |
+| 模型刷新正常但 chat 返回 504 | 免费模型推理排队超时 | 适当增大 `PROXY_FIRST_BYTE_TIMEOUT` 和 `HARD_TIMEOUT` |
+| 首次请求成功，后续全部 504 | 节点轮换后命中了不可用节点 | 在 OpenCode网关组中切换为固定可用节点，或检查轮询组节点健康状态 |
+
+---
+
 ## 环境变量
 
 | 变量 | 默认值 | 说明 |
