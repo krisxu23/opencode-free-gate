@@ -5,6 +5,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -26,3 +29,16 @@ jobs:
         with:
           name: opencode-free-gate-windows-x64
           path: opencode-free-gate.exe
+
+      # 手动触发时，额外把 exe 发布到 Releases 页（tag: exe-latest，每次覆盖更新）
+      - name: Publish to Release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh release delete exe-latest --yes --cleanup-tag || true
+          gh release create exe-latest \
+            --title "Windows EXE (latest)" \
+            --notes "自动构建于 $(date -u '+%Y-%m-%d %H:%M UTC')，源码 commit ${GITHUB_SHA::7}" \
+            opencode-free-gate.exe
