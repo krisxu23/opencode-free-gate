@@ -14,6 +14,7 @@ import (
 
 	"github.com/lxn/walk"
 	dcl "github.com/lxn/walk/declarative"
+	"github.com/lxn/win"
 )
 
 type gatewayUI struct {
@@ -225,9 +226,13 @@ func (ui *gatewayUI) pumpLogs() {
 	if len(ui.shownText) > 80000 {
 		ui.shownText = ui.shownText[len(ui.shownText)-50000:]
 	}
+	ui.logEdit.SetRedraw(false)
 	ui.logEdit.SetText(ui.shownText)
-	ui.logEdit.SendMessage(0xB1, ^uintptr(0), ^uintptr(0)) // EM_SETSEL(-1, -1)
-	ui.logEdit.SendMessage(0xB7, 0, 0)                      // EM_SCROLLCARET
+	ui.logEdit.SetRedraw(true)
+	// SetText 会重置滚动条到顶部；把光标移到末尾并滚动到可视区域。
+	hwnd := ui.logEdit.Handle()
+	win.SendMessage(hwnd, win.EM_SETSEL, ^uintptr(0), ^uintptr(0))
+	win.SendMessage(hwnd, win.EM_SCROLLCARET, 0, 0)
 }
 
 func (ui *gatewayUI) refreshStatus() {
