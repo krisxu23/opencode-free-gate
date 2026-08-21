@@ -26,14 +26,14 @@ jobs:
       - name: Run tests
         run: go test ./...
 
-      # 界面版：嵌入图标 + 清单
+      # 界面版：嵌入清单（用 rsrc）
       - name: Build GUI exe
         run: |
-          go run github.com/tc-hib/go-winres@latest generate
+          go run github.com/akavel/rsrc@latest -manifest gui.manifest -o rsrc.syso
           go build -trimpath -ldflags "-s -w -H windowsgui -X main.uiMode=gui" -o opencode-free-gate-gui.exe .
-          Remove-Item -Path *.syso -Force
+          Remove-Item -Path rsrc.syso -Force
 
-      # 控制台版：无图标无清单
+      # 控制台版：无清单
       - name: Build console exe
         run: |
           go build -trimpath -ldflags "-s -w -X main.uiMode=console" -o opencode-free-gate-console.exe .
@@ -46,7 +46,6 @@ jobs:
             opencode-free-gate-gui.exe
             opencode-free-gate-console.exe
 
-      # 手动触发时，把两个 exe 发布到 Releases 页（tag: exe-latest，每次覆盖更新）
       - name: Publish to Release
         if: github.event_name == 'workflow_dispatch'
         env:
