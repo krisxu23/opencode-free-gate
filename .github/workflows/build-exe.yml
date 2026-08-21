@@ -18,19 +18,36 @@ jobs:
         with:
           go-version: "1.24"
 
+      - name: Resolve dependencies
+        run: |
+          go mod tidy
+          go mod download
+
       - name: Run tests
         run: go test ./...
 
-      - name: Build
-        run: go build -trimpath -ldflags "-s -w" -o opencode-free-gate.exe .
+      # 界面版：嵌入清单（启用现代控件样式 + DPI 感知），并隐藏控制台窗口
+      - name: Build GUI exe
+        run: |
+          go install github.com/akavel/rsrc@latest
+          rsrc -manifest gui.manifest -arch amd64 -o rsrc_windows_amd64.syso
+          go build -trimpath -ldflags "-s -w -H windowsgui -X main.uiMode=gui" -o opencode-free-gate-gui.exe .
 
-      - name: Upload artifact
+      # 控制台版：保留原有黑窗口日志形态，便于排障
+      - name: Build console exe
+        run: |
+          Remove-Item rsrc_windows_amd64.syso -Force
+          go build -trimpath -ldflags "-s -w -X main.uiMode=console" -o opencode-free-gate-console.exe .
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: opencode-free-gate-windows-x64
-          path: opencode-free-gate.exe
+          path: |
+            opencode-free-gate-gui.exe
+            opencode-free-gate-console.exe
 
-      # 手动触发时，额外把 exe 发布到 Releases 页（tag: exe-latest，每次覆盖更新）
+      # 手动触发时，把两个 exe 发布到 Releases 页（tag: exe-latest，每次覆盖更新）
       - name: Publish to Release
         if: github.event_name == 'workflow_dispatch'
         env:
@@ -40,5 +57,9 @@ jobs:
           gh release delete exe-latest --yes --cleanup-tag || true
           gh release create exe-latest \
             --title "Windows EXE (latest)" \
-            --notes "自动构建于 $(date -u '+%Y-%m-%d %H:%M UTC')，源码 commit ${GITHUB_SHA::7}" \
-            opencode-free-gate.exe
+            --notes "自动构建于 $(date -u '+%Y-%m-%d %H:%M UTC')，源码 commit ${GITHUB_SHA::7}
+
+          - opencode-free-gate-gui.exe：图形界面版（推荐，双击即用）
+          - opencode-free-gate-console.exe：控制台版（排障用，输出纯日志）" \
+            opencode-free-gate-gui.exe \
+            opencode-free-gate-console.exe

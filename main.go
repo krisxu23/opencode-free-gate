@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -18,12 +19,24 @@ import (
 
 const maxRequestBody = 32 << 20
 
+// uiMode 由链接期 -ldflags "-X main.uiMode=..." 指定：gui 打开窗口，console 保持纯日志。
+var uiMode = "console"
+
 type app struct {
 	gateway *gateway
 }
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	gui := strings.EqualFold(uiMode, "gui")
+
+	settingsPath := configPath()
+	settings := loadSettings(settingsPath)
+	if gui {
+		settings.applyEnv()
+		log.SetOutput(io.MultiWriter(os.Stdout, uiLog))
+	}
+
 	cfg := loadConfig(currentProject())
 	gw := newGateway(cfg)
 	handler := &app{gateway: gw}
@@ -47,12 +60,30 @@ func main() {
 		errCh <- server.ListenAndServe()
 	}()
 
-	select {
-	case <-rootContext.Done():
-	case err := <-errCh:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("[门] server failed: %v", err)
-			stop()
+	if gui {
+		go func() {
+			if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("[门] server failed: %v", err)
+			}
+		}()
+		if err := runUI(handler, settings, settingsPath, stop); err != nil {
+			log.Printf("[门] 界面启动失败，退回控制台模式: %v", err)
+			select {
+			case <-rootContext.Done():
+			case err := <-errCh:
+				if err != nil && !errors.Is(err, http.ErrServerClosed) {
+					log.Printf("[门] server failed: %v", err)
+				}
+			}
+		}
+	} else {
+		select {
+		case <-rootContext.Done():
+		case err := <-errCh:
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("[门] server failed: %v", err)
+				stop()
+			}
 		}
 	}
 

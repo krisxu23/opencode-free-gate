@@ -55,10 +55,27 @@ func (g *gateway) modelMaps(ctx context.Context) (map[string]string, map[string]
 }
 
 func (g *gateway) fetchModelMaps(parent context.Context) (map[string]string, error) {
+	var lastErr error
+	for _, base := range g.cfg.upstreamPool() {
+		rename, err := g.fetchModelMapsFrom(parent, base)
+		if err == nil {
+			g.noteUpstreamResult(base, true)
+			return rename, nil
+		}
+		g.noteUpstreamResult(base, false)
+		lastErr = err
+		if parent.Err() != nil {
+			break
+		}
+	}
+	return nil, lastErr
+}
+
+func (g *gateway) fetchModelMapsFrom(parent context.Context, base string) (map[string]string, error) {
 	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
 	defer cancel()
 
-	target := strings.TrimRight(g.cfg.project.upstream, "/") + g.cfg.project.modelPath
+	target := strings.TrimRight(base, "/") + g.cfg.project.modelPath
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return nil, err
@@ -136,7 +153,8 @@ func extractModelIDs(body []byte) ([]string, error) {
 	return ids, nil
 }
 
-func (g *gateway) modelsResponse(ctx context.Context) *gatewayResponse {
+// modelIDs 返回对外展示的模型名列表（已排序），供 /v1/models 与界面共用。
+func (g *gateway) modelIDs(ctx context.Context) []string {
 	rename, _ := g.modelMaps(ctx)
 	unique := make(map[string]struct{}, len(rename)+len(g.cfg.project.extraModels))
 	for _, display := range rename {
@@ -150,6 +168,11 @@ func (g *gateway) modelsResponse(ctx context.Context) *gatewayResponse {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
+	return ids
+}
+
+func (g *gateway) modelsResponse(ctx context.Context) *gatewayResponse {
+	ids := g.modelIDs(ctx)
 
 	created := time.Now().Unix()
 	models := make([]map[string]any, 0, len(ids))

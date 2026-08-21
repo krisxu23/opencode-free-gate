@@ -25,6 +25,7 @@ type config struct {
 	customRetries    int
 	zenRetries       int
 	customProxies    string
+	mirrors          []string
 	zenRelay         string
 	zenKey           string
 	forceRelay       bool
@@ -62,6 +63,7 @@ func loadConfig(project projectSpec) config {
 		customRetries:    nonNegative(envInt("CUSTOM_RETRIES", 10)),
 		zenRetries:       nonNegative(envInt("ZENPROXY_RETRIES", 5)),
 		customProxies:    os.Getenv("CUSTOM_PROXIES"),
+		mirrors:          parseMirrorEnv(os.Getenv("MIRROR_URLS")),
 		zenRelay:         envString("ZENPROXY_RELAY", "https://zenproxy.top/api/relay"),
 		zenKey:           os.Getenv("ZENPROXY_KEY"),
 		forceRelay:       os.Getenv("FORCE_RELAY") == "1",
@@ -96,8 +98,7 @@ func (c config) usesPublicPool() bool {
 	return false
 }
 
-func parseProxyOrder(raw string) []string {
-	raw = strings.TrimSpace(raw)
+func parseProxyOrder(raw string) []string {	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil
 	}
@@ -129,6 +130,18 @@ func parseProxyOrder(raw string) []string {
 		return nil
 	}
 	return order
+}
+
+// parseMirrorEnv 解析 MIRROR_URLS 环境变量，无效条目会记录日志后跳过。
+func parseMirrorEnv(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	mirrors, bad := parseMirrorList(raw)
+	for _, message := range bad {
+		log.Printf("[配置] MIRROR_URLS 忽略无效条目: %s", message)
+	}
+	return mirrors
 }
 
 func envString(key, fallback string) string {

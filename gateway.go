@@ -48,6 +48,7 @@ type requestTrace struct {
 	proxies     map[string]struct{}
 	finalProxy  string
 	finalStatus int
+	upstream    string
 }
 
 func newRequestTrace() *requestTrace {
@@ -74,6 +75,10 @@ type gateway struct {
 	rootContext   context.Context
 	modelMu       sync.Mutex
 	modelCache    *cachedModels
+
+	mirrorMu     sync.Mutex
+	mirrorState  map[string]*mirrorHealth
+	mirrorCursor atomic.Uint64
 }
 
 func newGateway(cfg config) *gateway {
@@ -502,6 +507,7 @@ type upstreamRequest struct {
 	nonStream bool
 	session   string
 	deadline  time.Time
+	upstream  string // 本次请求使用的上游基址；空值表示项目默认上游
 }
 
 type gatewayResponse struct {
@@ -559,7 +565,11 @@ func (r *liveResponse) readAll(deadline time.Time) ([]byte, error) {
 }
 
 func (g *gateway) openUpstream(ctx context.Context, request upstreamRequest, proxyURL *url.URL, maxWait time.Duration) (*liveResponse, error) {
-	target := strings.TrimRight(g.cfg.project.upstream, "/") + request.path
+	base := request.upstream
+	if base == "" {
+		base = g.cfg.project.upstream
+	}
+	target := strings.TrimRight(base, "/") + request.path
 	wait, connectTimeout, responseHeaderTimeout := g.openTimeouts(request.deadline, maxWait)
 	return openHTTP(ctx, request.method, target, request.headers, request.body, proxyURL, wait, connectTimeout, responseHeaderTimeout)
 }
@@ -698,7 +708,55 @@ func (g *gateway) perform(ctx context.Context, request upstreamRequest, proxyURL
 	return &gatewayResponse{status: status, header: header, body: body}, nil
 }
 
+// dispatch 在主上游与镜像之间轮询：任一上游给出非重试状态即返回，
+// 失败的上游会被记录并在连续失败后短暂冷却。
 func (g *gateway) dispatch(ctx context.Context, request upstreamRequest, trace *requestTrace) (*gatewayResponse, error) {
+	pool := g.cfg.upstreamPool()
+	attempts := len(pool)
+	if attempts > 3 {
+		attempts = 3
+	}
+	if request.upstream != "" {
+		attempts = 1
+	}
+
+	var lastResponse *gatewayResponse
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		current := request
+		if current.upstream == "" {
+			current.upstream = g.pickUpstream()
+		}
+		if len(pool) > 1 {
+			log.Printf("[镜] 上游: %s", shortUpstream(current.upstream))
+		}
+		trace.upstream = shortUpstream(current.upstream)
+		response, err := g.dispatchOnce(ctx, current, trace)
+		if err != nil {
+			g.noteUpstreamResult(current.upstream, false)
+			if isTerminalContextError(ctx, err) {
+				return nil, err
+			}
+			lastErr = err
+			continue
+		}
+		if !retryableStatus(response.status) {
+			g.noteUpstreamResult(current.upstream, true)
+			return response, nil
+		}
+		g.noteUpstreamResult(current.upstream, false)
+		lastResponse = response
+	}
+	if lastResponse != nil {
+		return lastResponse, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, errNoProxy
+}
+
+func (g *gateway) dispatchOnce(ctx context.Context, request upstreamRequest, trace *requestTrace) (*gatewayResponse, error) {
 	if g.cfg.forceRelay {
 		if g.cfg.zenKey == "" {
 			return jsonGatewayResponse(http.StatusBadGateway, "FORCE_RELAY 但未配置 ZENPROXY_KEY"), nil
@@ -875,7 +933,7 @@ func (g *gateway) performRelay(ctx context.Context, request upstreamRequest) (*g
 	if err != nil {
 		return nil, err
 	}
-	target := strings.TrimRight(g.cfg.project.upstream, "/") + request.path
+	target := strings.TrimRight(requestUpstream(g.cfg.project.upstream, request), "/") + request.path
 	query := relay.Query()
 	query.Set("api_key", g.cfg.zenKey)
 	query.Set("url", target)
