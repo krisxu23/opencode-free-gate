@@ -139,16 +139,31 @@ func (g *gateway) loadCandidates(parent context.Context) error {
 	defer client.CloseIdleConnections()
 	res, err := client.Do(req)
 	if err != nil {
-		return err
+		log.Printf("[选] 公共池拉取失败: %v", err)
+		listItems := fetchListProxyItems(parent)
+		if len(listItems) == 0 {
+			return err
+		}
+		g.mu.Lock()
+		g.candidates = listItems
+		g.mu.Unlock()
+		log.Printf("[选] %d list-only candidates", len(listItems))
+		return nil
 	}
 	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return fmt.Errorf("proxy API returned %d", res.StatusCode)
-	}
+
+	listItems := fetchListProxyItems(parent)
 
 	var all []proxyItem
-	if err := json.NewDecoder(io.LimitReader(res.Body, 4<<20)).Decode(&all); err != nil {
-		return err
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		log.Printf("[选] 公共池 HTTP %d，仅使用自定义列表", res.StatusCode)
+	} else if err := json.NewDecoder(io.LimitReader(res.Body, 4<<20)).Decode(&all); err != nil {
+		log.Printf("[选] 公共池解析失败: %v", err)
+	}
+	all = append(all, listItems...)
+
+	if len(all) == 0 {
+		return fmt.Errorf("no proxy candidates (public pool and custom lists are both empty)")
 	}
 	filtered := make([]proxyItem, 0, len(all))
 	for _, item := range all {
