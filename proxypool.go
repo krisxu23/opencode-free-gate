@@ -184,6 +184,7 @@ func (g *gateway) refreshPool(ctx context.Context) {
 	}
 
 	added := 0
+	justAdded := make(map[string]struct{})
 	for _, result := range probeSlots(ctx, g, fresh) {
 		if result.slot.addr == "" {
 			continue
@@ -197,14 +198,23 @@ func (g *gateway) refreshPool(ctx context.Context) {
 		}
 		if g.addSlot(result.slot, true) {
 			added++
+			justAdded[result.slot.addr] = struct{}{}
 			log.Printf("[池+] %s (%dms)", result.slot.addr, result.latency.Milliseconds())
 		}
 	}
 
 	// 复检现有节点，剔除已失效的，保持池子新鲜。
+	// 本轮刚入池的节点跳过复检——几秒前才探活通过，没必要立刻再测一遍。
 	current := g.customSnapshot()
+	var recheck []slot
+	for _, s := range current {
+		if _, skip := justAdded[s.addr]; skip {
+			continue
+		}
+		recheck = append(recheck, s)
+	}
 	dead := 0
-	for _, result := range probeSlots(ctx, g, current) {
+	for _, result := range probeSlots(ctx, g, recheck) {
 		if result.slot.addr == "" {
 			continue
 		}

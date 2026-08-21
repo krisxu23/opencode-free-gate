@@ -34,7 +34,7 @@ type uiSettings struct {
 // defaultPoolSources 是在线节点池的预填源列表。
 var defaultPoolSources = []string{
 	"https://proxy.amux.ai/api/proxies",
-	"https://raw.githubusercontent.com/watchtttvv/free-proxy-list/refs/heads/main/proxy.txt",
+	"https://raw.githubusercontent.com/watchttvv/free-proxy-list/refs/heads/main/proxy.txt",
 	"https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt",
 	"https://bestcf.pages.dev/s5gy/all.txt",
 	"https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
