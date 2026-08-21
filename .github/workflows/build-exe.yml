@@ -30,7 +30,7 @@ jobs:
       - name: Build GUI exe
         shell: bash
         run: |
-          go run github.com/tc-hib/go-winres@latest generate --icon app.ico
+          go run github.com/tc-hib/go-winres@latest generate
           go run github.com/akavel/rsrc@latest -manifest gui.manifest -o rsrc.syso
           go build -trimpath -ldflags "-s -w -H windowsgui -X main.uiMode=gui" -o opencode-free-gate-gui.exe .
           rm -f *.syso
