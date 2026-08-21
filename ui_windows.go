@@ -34,6 +34,7 @@ type gatewayUI struct {
 	outboundBox  *walk.ComboBox
 	logCursor    int
 	modelsSeen   string
+	shownText    string
 	shutdownOnce func()
 }
 
@@ -177,7 +178,7 @@ func runGatewayUI(handler *app, settings uiSettings, path string, shutdown func(
 	})
 
 	stopTicker := make(chan struct{})
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(300 * time.Millisecond)
 	go func() {
 		defer ticker.Stop()
 		for {
@@ -211,10 +212,19 @@ func (ui *gatewayUI) pumpLogs() {
 		return
 	}
 	ui.logCursor = cursor
-	if text := ui.logEdit.Text(); len(text) > 240000 {
-		ui.logEdit.SetText(text[len(text)-160000:])
+	newText := strings.Join(lines, "\r\n")
+	if ui.shownText == "" {
+		ui.shownText = newText
+	} else {
+		ui.shownText = ui.shownText + "\r\n" + newText
 	}
-	ui.logEdit.AppendText(strings.Join(lines, "\r\n") + "\r\n")
+	// 只保留尾部，避免长时间运行后控件内容无限增长。
+	if len(ui.shownText) > 200000 {
+		ui.shownText = ui.shownText[len(ui.shownText)-150000:]
+	}
+	ui.logEdit.SetText(ui.shownText)
+	ui.logEdit.SendMessage(0xB1, ^uintptr(0), ^uintptr(0)) // EM_SETSEL(-1, -1)
+	ui.logEdit.SendMessage(0xB7, 0, 0)                      // EM_SCROLLCARET
 }
 
 func (ui *gatewayUI) refreshStatus() {

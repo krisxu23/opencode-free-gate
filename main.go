@@ -35,6 +35,7 @@ func main() {
 	if gui {
 		settings.applyEnv()
 		log.SetOutput(io.MultiWriter(os.Stdout, uiLog))
+		log.Printf("[启动] 界面模式已激活，日志缓冲就绪")
 	}
 
 	cfg := loadConfig(currentProject())
