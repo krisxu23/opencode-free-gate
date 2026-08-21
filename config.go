@@ -12,6 +12,7 @@ const (
 	layerPublic = "public"
 	layerZen    = "zen"
 	layerCustom = "custom"
+	layerDirect = "direct" // 伪层：跳过所有代理层，直接走直连兜底
 )
 
 type config struct {
@@ -115,10 +116,12 @@ func parseProxyOrder(raw string) []string {	raw = strings.TrimSpace(raw)
 			name = layerZen
 		case "custom":
 			name = layerCustom
+		case "direct", "none", "off":
+			name = layerDirect
 		case "":
 			continue
 		default:
-			log.Printf("[配置] PROXY_ORDER 含未知层 %q，已忽略（可用：public、zen、custom）", token)
+			log.Printf("[配置] PROXY_ORDER 含未知层 %q，已忽略（可用：public、zen、custom、direct）", token)
 			continue
 		}
 		if _, duplicate := seen[name]; duplicate {

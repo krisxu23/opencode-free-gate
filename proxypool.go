@@ -345,6 +345,25 @@ func (g *gateway) dropCustom(address string) bool {
 	return removed
 }
 
+// noteCustomResult 记录节点在真实请求中的表现；连续 3 次失败自动移出池子，
+// 避免死节点反复浪费重试预算。成功即清零。
+func (g *gateway) noteCustomResult(address string, ok bool) {
+	g.customFailsMu.Lock()
+	defer g.customFailsMu.Unlock()
+	if ok {
+		delete(g.customFails, address)
+		return
+	}
+	g.customFails[address]++
+	if g.customFails[address] < 3 {
+		return
+	}
+	delete(g.customFails, address)
+	if g.dropCustom(address) {
+		log.Printf("[池x] %s 连续失败，移出节点池", address)
+	}
+}
+
 func (g *gateway) customSnapshot() []slot {
 	g.mu.RLock()
 	defer g.mu.RUnlock()

@@ -130,7 +130,12 @@ func (s uiSettings) save(path string) error {
 // applyEnv 把配置转换为环境变量；已显式设置的环境变量优先，不被覆盖。
 func (s uiSettings) applyEnv() {
 	setIfEmpty("PORT", fmt.Sprintf("%d", s.Port))
-	setIfEmpty("PROXY_ORDER", "custom")
+	// 仅直连模式显式跳过代理层；走代理模式从自定义池（含节点池）开始。
+	if s.Outbound == outboundProxy {
+		setIfEmpty("PROXY_ORDER", "custom")
+	} else {
+		setIfEmpty("PROXY_ORDER", "direct")
+	}
 	if s.Outbound == outboundProxy && len(s.Proxies) > 0 {
 		setIfEmpty("CUSTOM_PROXIES", strings.Join(s.Proxies, ","))
 	}

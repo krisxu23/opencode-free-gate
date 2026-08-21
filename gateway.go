@@ -82,10 +82,13 @@ type gateway struct {
 
 	poolFailedMu sync.Mutex
 	poolFailed   map[string]time.Time
+
+	customFailsMu sync.Mutex
+	customFails   map[string]int
 }
 
 func newGateway(cfg config) *gateway {
-	return &gateway{cfg: cfg, poolFailed: make(map[string]time.Time)}
+	return &gateway{cfg: cfg, poolFailed: make(map[string]time.Time), customFails: make(map[string]int)}
 }
 
 func (g *gateway) start(ctx context.Context) {
@@ -884,13 +887,16 @@ func (g *gateway) dispatchCustomLayer(ctx context.Context, request upstreamReque
 			if isTerminalContextError(ctx, err) {
 				return nil, err
 			}
+			g.noteCustomResult(candidate.addr, false)
 			log.Printf("[错] %s: %v", candidate.addr, err)
 			continue
 		}
 		if !retryableStatus(response.status) {
+			g.noteCustomResult(candidate.addr, true)
 			trace.finalProxy = candidate.addr
 			return response, nil
 		}
+		g.noteCustomResult(candidate.addr, false)
 		log.Printf("[错码] %s 状态码 %d", candidate.addr, response.status)
 		last = response
 		lastProxy = candidate.addr
