@@ -216,23 +216,22 @@ func (ui *gatewayUI) pumpLogs() {
 		return
 	}
 	ui.logCursor = cursor
+	// 最新的日志放最上面（倒序显示），这样新日志出现时不需要滚动。
 	newText := strings.Join(lines, "\r\n")
 	if ui.shownText == "" {
 		ui.shownText = newText
 	} else {
-		ui.shownText = ui.shownText + "\r\n" + newText
+		ui.shownText = newText + "\r\n" + ui.shownText
 	}
+	// 超长时从尾部（最旧的内容）截断。
 	if len(ui.shownText) > 80000 {
-		ui.shownText = ui.shownText[len(ui.shownText)-50000:]
+		ui.shownText = ui.shownText[:50000]
 	}
 	hwnd := ui.logEdit.Handle()
 	win.SendMessage(hwnd, win.WM_SETREDRAW, 0, 0)
 	ui.logEdit.SetText(ui.shownText)
 	win.SendMessage(hwnd, win.WM_SETREDRAW, 1, 0)
 	win.UpdateWindow(hwnd)
-	// SetText 重置滚动条到顶部；把光标移到末尾并滚动到可视区域。
-	win.SendMessage(hwnd, win.EM_SETSEL, ^uintptr(0), ^uintptr(0))
-	win.SendMessage(hwnd, win.EM_SCROLLCARET, 0, 0)
 }
 
 func (ui *gatewayUI) refreshStatus() {
