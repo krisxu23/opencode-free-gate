@@ -280,8 +280,8 @@ func appendPoolBody(out *[]slot, seen map[string]struct{}, body []byte) int {
 		var items []proxyItem
 		if err := json.Unmarshal([]byte(trimmed), &items); err == nil {
 			for _, item := range items {
-				s, ok := slotFromProxy(item.Address, item.Protocol)
-				appendSlot(s, ok)
+				s, slotErr := slotFromProxy(item.Address, item.Protocol)
+				appendSlot(s, slotErr == nil)
 			}
 			return count
 		}
