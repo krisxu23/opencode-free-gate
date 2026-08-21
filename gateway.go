@@ -896,7 +896,7 @@ func (g *gateway) dispatchCustomLayer(ctx context.Context, request upstreamReque
 			trace.finalProxy = candidate.addr
 			return response, nil
 		}
-		g.noteCustomResult(candidate.addr, false)
+		// 注意：429 等状态码说明节点能连通上游（只是暂时限流），不算节点故障。
 		log.Printf("[错码] %s 状态码 %d", candidate.addr, response.status)
 		last = response
 		lastProxy = candidate.addr
