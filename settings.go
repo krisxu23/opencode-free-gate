@@ -27,6 +27,19 @@ type uiSettings struct {
 	FirstByteSeconds int      `json:"first_byte_seconds"` // 流式首字节超时，秒
 	BudgetSeconds    int      `json:"budget_seconds"`     // 流式总预算，秒
 	GatewayKey       string   `json:"gateway_key"`        // 展示用的默认 Key
+	PoolEnabled      bool     `json:"pool_enabled"`       // 在线节点池开关
+	PoolInput        string   `json:"pool_input"`         // 节点源链接，回填输入框
+}
+
+// defaultPoolSources 是在线节点池的预填源列表。
+var defaultPoolSources = []string{
+	"https://proxy.amux.ai/api/proxies",
+	"https://raw.githubusercontent.com/watchtttvv/free-proxy-list/refs/heads/main/proxy.txt",
+	"https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt",
+	"https://bestcf.pages.dev/s5gy/all.txt",
+	"https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
+	"https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5.txt",
+	"https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt",
 }
 
 func defaultSettings() uiSettings {
@@ -40,6 +53,8 @@ func defaultSettings() uiSettings {
 		FirstByteSeconds: 30,
 		BudgetSeconds:    180,
 		GatewayKey:       defaultGatewayKey,
+		PoolEnabled:      false,
+		PoolInput:        strings.Join(defaultPoolSources, "\r\n"),
 	}
 }
 
@@ -85,6 +100,9 @@ func (s uiSettings) normalized() uiSettings {
 	if strings.TrimSpace(s.GatewayKey) == "" {
 		s.GatewayKey = defaultGatewayKey
 	}
+	if strings.TrimSpace(s.PoolInput) == "" {
+		s.PoolInput = strings.Join(defaultPoolSources, "\r\n")
+	}
 	if len(s.Proxies) == 0 && strings.TrimSpace(s.ProxyInput) != "" {
 		s.Proxies, _ = ParseProxyInput(s.ProxyInput)
 	}
@@ -121,6 +139,11 @@ func (s uiSettings) applyEnv() {
 	}
 	setIfEmpty("PROXY_FIRST_BYTE_TIMEOUT", fmt.Sprintf("%d", s.FirstByteSeconds*1000))
 	setIfEmpty("HARD_TIMEOUT", fmt.Sprintf("%d", s.BudgetSeconds*1000))
+	if s.PoolEnabled {
+		if urls := parsePoolSources(s.PoolInput); len(urls) > 0 {
+			setIfEmpty("PROXY_LIST_URLS", strings.Join(urls, ","))
+		}
+	}
 }
 
 func setIfEmpty(key, value string) {

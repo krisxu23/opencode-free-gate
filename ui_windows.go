@@ -28,6 +28,8 @@ type gatewayUI struct {
 	logEdit      *walk.TextEdit
 	proxyEdit    *walk.TextEdit
 	mirrorEdit   *walk.TextEdit
+	poolCheck    *walk.CheckBox
+	poolEdit     *walk.TextEdit
 	apiEdit      *walk.LineEdit
 	keyEdit      *walk.LineEdit
 	firstByte    *walk.NumberEdit
@@ -109,6 +111,25 @@ func runGatewayUI(handler *app, settings uiSettings, path string, shutdown func(
 							}},
 							dcl.HSpacer{},
 						},
+					},
+				},
+			},
+
+			dcl.GroupBox{
+				Title:  "在线节点池",
+				Layout: dcl.VBox{},
+				Children: []dcl.Widget{
+					dcl.CheckBox{
+						AssignTo: &ui.poolCheck,
+						Text:     "自动拉取在线节点并探活（每轮用真实 opencode.ai 请求测活，健康节点实时入池、失效自动移除，无需重启）",
+						Checked:  settings.PoolEnabled,
+					},
+					dcl.Label{Text: "节点源链接（一行一个；支持 socks5 文本列表与 amux JSON，github 页面链接自动转 raw）:"},
+					dcl.TextEdit{
+						AssignTo: &ui.poolEdit,
+						Text:     settings.PoolInput,
+						VScroll:  true,
+						MinSize:  dcl.Size{Height: 64},
 					},
 				},
 			},
@@ -247,8 +268,13 @@ func (ui *gatewayUI) refreshStatus() {
 	if ui.settings.Outbound == outboundProxy {
 		mode = fmt.Sprintf("走代理 %d/%d 在线", gw.customCount(), len(ui.settings.Proxies))
 	}
-	ui.statusLabel.SetText(fmt.Sprintf("● 运行中     端口 %d     %s     上游 %d 个轮换",
-		gw.cfg.port, mode, len(gw.cfg.upstreamPool())))
+	poolInfo := ""
+	if ui.settings.PoolEnabled {
+		sources := parsePoolSources(ui.settings.PoolInput)
+		poolInfo = fmt.Sprintf("     节点池 %d 源自动探活", len(sources))
+	}
+	ui.statusLabel.SetText(fmt.Sprintf("● 运行中     端口 %d     %s%s     上游 %d 个轮换",
+		gw.cfg.port, mode, poolInfo, len(gw.cfg.upstreamPool())))
 }
 
 // modelWatcher 后台定时拉取模型列表并同步到界面。
@@ -290,6 +316,8 @@ func (ui *gatewayUI) collect() (uiSettings, string) {
 	next.BudgetSeconds = int(ui.budget.Value())
 	next.ProxyInput = ui.proxyEdit.Text()
 	next.MirrorInput = ui.mirrorEdit.Text()
+	next.PoolEnabled = ui.poolCheck.Checked()
+	next.PoolInput = ui.poolEdit.Text()
 
 	proxies, proxyErrors := ParseProxyInput(next.ProxyInput)
 	mirrors, mirrorErrors := parseMirrorList(next.MirrorInput)
@@ -305,6 +333,12 @@ func (ui *gatewayUI) collect() (uiSettings, string) {
 		}
 	} else {
 		report.WriteString("\r\n")
+	}
+	if next.PoolEnabled {
+		sources := parsePoolSources(next.PoolInput)
+		fmt.Fprintf(&report, "在线节点池：开启，%d 个源（后台自动探活入池）\r\n", len(sources))
+	} else {
+		report.WriteString("在线节点池：关闭\r\n")
 	}
 	fmt.Fprintf(&report, "上游镜像：可用 %d 个", len(mirrors))
 	if len(mirrorErrors) > 0 {

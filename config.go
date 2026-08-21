@@ -26,6 +26,7 @@ type config struct {
 	zenRetries       int
 	customProxies    string
 	mirrors          []string
+	poolURLs         []string
 	zenRelay         string
 	zenKey           string
 	forceRelay       bool
@@ -64,6 +65,7 @@ func loadConfig(project projectSpec) config {
 		zenRetries:       nonNegative(envInt("ZENPROXY_RETRIES", 5)),
 		customProxies:    os.Getenv("CUSTOM_PROXIES"),
 		mirrors:          parseMirrorEnv(os.Getenv("MIRROR_URLS")),
+		poolURLs:         parsePoolSources(os.Getenv("PROXY_LIST_URLS")),
 		zenRelay:         envString("ZENPROXY_RELAY", "https://zenproxy.top/api/relay"),
 		zenKey:           os.Getenv("ZENPROXY_KEY"),
 		forceRelay:       os.Getenv("FORCE_RELAY") == "1",

@@ -79,10 +79,13 @@ type gateway struct {
 	mirrorMu     sync.Mutex
 	mirrorState  map[string]*mirrorHealth
 	mirrorCursor atomic.Uint64
+
+	poolFailedMu sync.Mutex
+	poolFailed   map[string]time.Time
 }
 
 func newGateway(cfg config) *gateway {
-	return &gateway{cfg: cfg}
+	return &gateway{cfg: cfg, poolFailed: make(map[string]time.Time)}
 }
 
 func (g *gateway) start(ctx context.Context) {
@@ -101,6 +104,11 @@ func (g *gateway) start(ctx context.Context) {
 		}
 		log.Printf("[门] 预热完成")
 	}()
+
+	if len(g.cfg.poolURLs) > 0 {
+		log.Printf("[池] 在线节点池已启用：%d 个源", len(g.cfg.poolURLs))
+		go g.startPoolWatcher(ctx)
+	}
 
 	if g.cfg.usesPublicPool() {
 		go func() {

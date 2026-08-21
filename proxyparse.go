@@ -20,14 +20,21 @@ func (e proxyParseError) Error() string {
 	return fmt.Sprintf("第 %d 行 %q: %v", e.Line, e.Input, e.Err)
 }
 
-// splitProxyInput 按换行与逗号拆分输入，忽略空白片段。
+// splitProxyInput 拆分输入：先按换行分行，去掉 # 名称片段（片段里常有逗号、
+// 空格等干扰字符），再按逗号拆分同一行内的多个节点。
 func splitProxyInput(raw string) []string {
-	fields := strings.FieldsFunc(raw, func(r rune) bool { return r == '\n' || r == '\r' || r == ',' })
-	out := make([]string, 0, len(fields))
-	for _, field := range fields {
-		field = strings.TrimSpace(field)
-		if field != "" {
-			out = append(out, field)
+	lines := strings.FieldsFunc(raw, func(r rune) bool { return r == '\n' || r == '\r' })
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if i := strings.Index(line, "#"); i >= 0 {
+			line = strings.TrimSpace(line[:i])
+		}
+		for _, field := range strings.Split(line, ",") {
+			field = strings.TrimSpace(field)
+			if field != "" {
+				out = append(out, field)
+			}
 		}
 	}
 	return out
