@@ -1,0 +1,10 @@
+icon: app.ico
+manifest: gui.manifest
+info:
+  CompanyName: ""
+  FileDescription: "OpenCode Free Model Gateway"
+  ProductName: "opencode-free-gate"
+  OriginalFilename: "opencode-free-gate-gui.exe"
+  FileVersion: "1.0.0"
+  ProductVersion: "1.0.0"
+  InternalName: "opencode-free-gate"

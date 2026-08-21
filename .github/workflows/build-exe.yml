@@ -26,17 +26,18 @@ jobs:
       - name: Run tests
         run: go test ./...
 
-      # 界面版：嵌入清单（启用现代控件样式 + DPI 感知），并隐藏控制台窗口
+      # 界面版：嵌入图标 + 清单
       - name: Build GUI exe
         run: |
-          go install github.com/akavel/rsrc@latest
-          rsrc -manifest gui.manifest -arch amd64 -o rsrc_windows_amd64.syso
+          go get github.com/tc-hib/go-winres@latest
+          go install github.com/tc-hib/go-winres@latest
+          go-winres generate
           go build -trimpath -ldflags "-s -w -H windowsgui -X main.uiMode=gui" -o opencode-free-gate-gui.exe .
+          Remove-Item -Path *.syso -Force
 
-      # 控制台版：保留原有黑窗口日志形态，便于排障
+      # 控制台版：无图标无清单
       - name: Build console exe
         run: |
-          Remove-Item rsrc_windows_amd64.syso -Force
           go build -trimpath -ldflags "-s -w -X main.uiMode=console" -o opencode-free-gate-console.exe .
 
       - name: Upload artifacts
