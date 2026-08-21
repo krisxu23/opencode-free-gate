@@ -222,15 +222,15 @@ func (ui *gatewayUI) pumpLogs() {
 	} else {
 		ui.shownText = ui.shownText + "\r\n" + newText
 	}
-	// 只保留尾部，避免长时间运行后内存无限增长。
 	if len(ui.shownText) > 80000 {
 		ui.shownText = ui.shownText[len(ui.shownText)-50000:]
 	}
-	ui.logEdit.SetRedraw(false)
-	ui.logEdit.SetText(ui.shownText)
-	ui.logEdit.SetRedraw(true)
-	// SetText 会重置滚动条到顶部；把光标移到末尾并滚动到可视区域。
 	hwnd := ui.logEdit.Handle()
+	win.SendMessage(hwnd, win.WM_SETREDRAW, 0, 0)
+	ui.logEdit.SetText(ui.shownText)
+	win.SendMessage(hwnd, win.WM_SETREDRAW, 1, 0)
+	win.UpdateWindow(hwnd)
+	// SetText 重置滚动条到顶部；把光标移到末尾并滚动到可视区域。
 	win.SendMessage(hwnd, win.EM_SETSEL, ^uintptr(0), ^uintptr(0))
 	win.SendMessage(hwnd, win.EM_SCROLLCARET, 0, 0)
 }
