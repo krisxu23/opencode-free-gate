@@ -18,10 +18,8 @@ jobs:
         with:
           go-version: "1.24"
 
-      # 先装 go-winres，再 tidy，确保所有依赖（含间接）都被收集
-      - name: Install go-winres and resolve dependencies
+      - name: Resolve dependencies
         run: |
-          go get github.com/tc-hib/go-winres@latest
           go mod tidy
           go mod download
 
@@ -31,7 +29,7 @@ jobs:
       # 界面版：嵌入图标 + 清单
       - name: Build GUI exe
         run: |
-          go-winres generate
+          go run github.com/tc-hib/go-winres@latest generate
           go build -trimpath -ldflags "-s -w -H windowsgui -X main.uiMode=gui" -o opencode-free-gate-gui.exe .
           Remove-Item -Path *.syso -Force
 
