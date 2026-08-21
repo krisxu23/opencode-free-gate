@@ -51,9 +51,16 @@ func runGatewayUI(handler *app, settings uiSettings, path string, shutdown func(
 	}
 	apiBase := fmt.Sprintf("http://localhost:%d/openai/v1", settings.Port)
 
+	// 从 exe 资源加载图标（go-winres 嵌入的 ID=1），用于标题栏和任务栏。
+	var appIcon *walk.Icon
+	if i, err := walk.NewIconFromResourceId(1); err == nil {
+		appIcon = i
+	}
+
 	if err := (dcl.MainWindow{
 		AssignTo: &ui.window,
 		Title:    "opencode-free-gate",
+		Icon:     appIcon,
 		MinSize:  dcl.Size{Width: 760, Height: 640},
 		Size:     dcl.Size{Width: 820, Height: 720},
 		Layout:   dcl.VBox{},
