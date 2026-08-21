@@ -6,11 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -34,7 +32,7 @@ func main() {
 	settings := loadSettings(settingsPath)
 	if gui {
 		settings.applyEnv()
-		log.SetOutput(io.MultiWriter(os.Stdout, uiLog))
+		log.SetOutput(uiLog)
 		log.Printf("[启动] 界面模式已激活，日志缓冲就绪")
 	}
 

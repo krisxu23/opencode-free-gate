@@ -194,8 +194,11 @@ func runGatewayUI(handler *app, settings uiSettings, path string, shutdown func(
 
 	go ui.modelWatcher()
 
-	ui.tick()
 	ui.window.Show()
+
+	// Show 之后手动刷一次日志，确保窗口已可见时日志立刻出现。
+	ui.tick()
+
 	ui.window.Run()
 	return nil
 }
