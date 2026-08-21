@@ -26,14 +26,12 @@ jobs:
       - name: Run tests
         run: go test ./...
 
-      # 界面版：图标(go-winres) + 清单(rsrc) 分别嵌入，互不冲突
+      # 界面版：用 go-winres simply 一次性嵌入图标 + GUI清单
       - name: Build GUI exe
-        shell: bash
         run: |
-          go run github.com/tc-hib/go-winres@latest generate
-          go run github.com/akavel/rsrc@latest -manifest gui.manifest -o rsrc.syso
+          go run github.com/tc-hib/go-winres@latest simply --icon app.ico --manifest gui --arch amd64
           go build -trimpath -ldflags "-s -w -H windowsgui -X main.uiMode=gui" -o opencode-free-gate-gui.exe .
-          rm -f *.syso
+          Remove-Item -Path *.syso -Force
 
       # 控制台版：无图标无清单
       - name: Build console exe
