@@ -221,9 +221,9 @@ func (ui *gatewayUI) pumpLogs() {
 	} else {
 		ui.shownText = ui.shownText + "\r\n" + newText
 	}
-	// 只保留尾部，避免长时间运行后控件内容无限增长。
-	if len(ui.shownText) > 200000 {
-		ui.shownText = ui.shownText[len(ui.shownText)-150000:]
+	// 只保留尾部，避免长时间运行后内存无限增长。
+	if len(ui.shownText) > 80000 {
+		ui.shownText = ui.shownText[len(ui.shownText)-50000:]
 	}
 	ui.logEdit.SetText(ui.shownText)
 	ui.logEdit.SendMessage(0xB1, ^uintptr(0), ^uintptr(0)) // EM_SETSEL(-1, -1)
@@ -244,7 +244,7 @@ func (ui *gatewayUI) refreshStatus() {
 func (ui *gatewayUI) modelWatcher() {
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		ids := ui.app.gateway.modelIDs(ctx)
+		ids := ui.app.gateway.modelUpstreamIDs(ctx)
 		cancel()
 		if len(ids) > 0 {
 			text := strings.Join(ids, "\r\n")

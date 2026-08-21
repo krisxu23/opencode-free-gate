@@ -153,6 +153,24 @@ func extractModelIDs(body []byte) ([]string, error) {
 	return ids, nil
 }
 
+// modelUpstreamIDs 返回供客户端使用的上游模型完整 ID（含 -free 后缀），已排序。
+func (g *gateway) modelUpstreamIDs(ctx context.Context) []string {
+	rename, _ := g.modelMaps(ctx)
+	unique := make(map[string]struct{}, len(rename)+len(g.cfg.project.extraModels))
+	for upstreamID := range rename {
+		unique[upstreamID] = struct{}{}
+	}
+	for _, model := range g.cfg.project.extraModels {
+		unique[model] = struct{}{}
+	}
+	ids := make([]string, 0, len(unique))
+	for id := range unique {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
 // modelIDs 返回对外展示的模型名列表（已排序），供 /v1/models 与界面共用。
 func (g *gateway) modelIDs(ctx context.Context) []string {
 	rename, _ := g.modelMaps(ctx)
