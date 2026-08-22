@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,32 +18,52 @@ import (
 	"github.com/lxn/win"
 )
 
+// 界面字体：walk 的控件字体不继承父容器，必须逐个显式设置；
+// 中文用微软雅黑 UI 更精致，地址/日志/模型列表用等宽字体便于对齐。
+var (
+	uiFont       = dcl.Font{Family: "Microsoft YaHei UI", PointSize: 9}
+	headlineFont = dcl.Font{Family: "Microsoft YaHei UI", PointSize: 12, Bold: true}
+	monoFont     = dcl.Font{Family: "Consolas", PointSize: 9}
+)
+
+// 健康色：蓝=尚无请求，绿=正常，橙=最近被限流/上游错误/出现截断，红=最近请求失败。
+var (
+	colorIdle  = walk.RGB(0, 120, 215)
+	colorOK    = walk.RGB(16, 124, 16)
+	colorWarn  = walk.RGB(202, 80, 0)
+	colorError = walk.RGB(196, 43, 28)
+)
+
 type gatewayUI struct {
 	window   *walk.MainWindow
 	app      *app
 	settings uiSettings
 	path     string
 
-	statusLabel  *walk.Label
-	modelsEdit   *walk.TextEdit
-	logEdit      *walk.TextEdit
-	proxyEdit    *walk.TextEdit
-	mirrorEdit   *walk.TextEdit
-	poolCheck    *walk.CheckBox
-	poolEdit     *walk.TextEdit
-	raceCheck    *walk.CheckBox
-	poolLive     *walk.TextEdit
-	apiEdit      *walk.LineEdit
-	keyEdit      *walk.LineEdit
-	firstByte    *walk.NumberEdit
-	budget       *walk.NumberEdit
-	outboundBox  *walk.ComboBox
-	logCursor    int
-	modelsSeen   string
-	shownText    string
-	poolLiveText string
-	statusText   string
-	shutdownOnce func()
+	statusLabel   *walk.Label
+	headline      *walk.Label
+	headlineText  string
+	headlineColor walk.Color
+	titleText     string
+	modelsEdit    *walk.TextEdit
+	logEdit       *walk.TextEdit
+	proxyEdit     *walk.TextEdit
+	mirrorEdit    *walk.TextEdit
+	poolCheck     *walk.CheckBox
+	poolEdit      *walk.TextEdit
+	raceCheck     *walk.CheckBox
+	poolLive      *walk.TextEdit
+	apiEdit       *walk.LineEdit
+	keyEdit       *walk.LineEdit
+	firstByte     *walk.NumberEdit
+	budget        *walk.NumberEdit
+	outboundBox   *walk.ComboBox
+	logCursor     int
+	modelsSeen    string
+	shownText     string
+	poolLiveText  string
+	statusText    string
+	shutdownOnce  func()
 }
 
 var outboundChoices = []string{"走代理（失败自动直连兜底）", "仅直连"}
@@ -67,31 +88,36 @@ func runGatewayUI(handler *app, settings uiSettings, path string, shutdown func(
 		AssignTo: &ui.window,
 		Title:    "opencode-free-gate",
 		Icon:     appIcon,
+		Font:     uiFont,
 		MinSize:  dcl.Size{Width: 760, Height: 460},
 		Size:     dcl.Size{Width: 820, Height: 560},
-		Layout:   dcl.VBox{},
+		Layout:   dcl.VBox{Spacing: 8, Margins: dcl.Margins{Left: 10, Top: 10, Right: 10, Bottom: 10}},
 		Children: []dcl.Widget{
 			dcl.TabWidget{
+				Font: uiFont,
 				Pages: []dcl.TabPage{
 					{
 						Title:  "运行状态",
-						Layout: dcl.VBox{},
+						Layout: dcl.VBox{Spacing: 8},
 						Children: []dcl.Widget{
 							dcl.GroupBox{
 								Title:  "运行状态",
+								Font:   uiFont,
 								Layout: dcl.Grid{Columns: 3},
 								Children: []dcl.Widget{
-									dcl.Label{AssignTo: &ui.statusLabel, Text: "● 启动中…", ColumnSpan: 3},
+									dcl.Label{AssignTo: &ui.headline, Text: "● 启动中…", Font: headlineFont, TextColor: colorIdle, ColumnSpan: 3},
+
+									dcl.Label{AssignTo: &ui.statusLabel, Text: "正在初始化…", Font: uiFont, ColumnSpan: 3},
 
 									dcl.Label{Text: "API 地址:"},
-									dcl.LineEdit{AssignTo: &ui.apiEdit, Text: apiBase, ReadOnly: true},
-									dcl.PushButton{Text: "复制", MaxSize: dcl.Size{Width: 80}, OnClicked: func() {
+									dcl.LineEdit{AssignTo: &ui.apiEdit, Text: apiBase, ReadOnly: true, Font: monoFont},
+									dcl.PushButton{Text: "复制", Font: uiFont, MaxSize: dcl.Size{Width: 80}, OnClicked: func() {
 										ui.copyText(ui.apiEdit.Text(), "API 地址")
 									}},
 
 									dcl.Label{Text: "默认 Key:"},
-									dcl.LineEdit{AssignTo: &ui.keyEdit, Text: settings.GatewayKey, ReadOnly: true},
-									dcl.PushButton{Text: "复制", MaxSize: dcl.Size{Width: 80}, OnClicked: func() {
+									dcl.LineEdit{AssignTo: &ui.keyEdit, Text: settings.GatewayKey, ReadOnly: true, Font: monoFont},
+									dcl.PushButton{Text: "复制", Font: uiFont, MaxSize: dcl.Size{Width: 80}, OnClicked: func() {
 										ui.copyText(ui.keyEdit.Text(), "默认 Key")
 									}},
 
@@ -104,19 +130,21 @@ func runGatewayUI(handler *app, settings uiSettings, path string, shutdown func(
 
 							dcl.GroupBox{
 								Title:  "实时免费模型（上游拉取，可直接复制）",
-								Layout: dcl.VBox{},
+								Font:   uiFont,
+								Layout: dcl.VBox{Spacing: 6},
 								Children: []dcl.Widget{
 									dcl.TextEdit{
 										AssignTo: &ui.modelsEdit,
 										ReadOnly: true,
 										VScroll:  true,
 										MinSize:  dcl.Size{Height: 96},
+										Font:     monoFont,
 										Text:     "正在获取…",
 									},
 									dcl.Composite{
 										Layout: dcl.HBox{MarginsZero: true},
 										Children: []dcl.Widget{
-											dcl.PushButton{Text: "复制全部模型名", OnClicked: func() {
+											dcl.PushButton{Text: "复制全部模型名", Font: uiFont, OnClicked: func() {
 												ui.copyText(ui.modelsEdit.Text(), "模型列表")
 											}},
 											dcl.HSpacer{},
@@ -127,7 +155,8 @@ func runGatewayUI(handler *app, settings uiSettings, path string, shutdown func(
 
 							dcl.GroupBox{
 								Title:  "实时在线节点",
-								Layout: dcl.VBox{},
+								Font:   uiFont,
+								Layout: dcl.VBox{Spacing: 6},
 								Children: []dcl.Widget{
 									dcl.Label{Text: "探活通过自动加入、失效自动移除；手动节点永不自动移除:"},
 									dcl.TextEdit{
@@ -135,6 +164,7 @@ func runGatewayUI(handler *app, settings uiSettings, path string, shutdown func(
 										ReadOnly: true,
 										VScroll:  true,
 										MinSize:  dcl.Size{Height: 120},
+										Font:     monoFont,
 									},
 								},
 							},
@@ -143,11 +173,12 @@ func runGatewayUI(handler *app, settings uiSettings, path string, shutdown func(
 
 					{
 						Title:  "设置",
-						Layout: dcl.VBox{},
+						Layout: dcl.VBox{Spacing: 8},
 						Children: []dcl.Widget{
 							dcl.GroupBox{
 								Title:  "出站与超时",
-								Layout: dcl.VBox{},
+								Font:   uiFont,
+								Layout: dcl.VBox{Spacing: 6},
 								Children: []dcl.Widget{
 									dcl.Composite{
 										Layout: dcl.HBox{MarginsZero: true},
@@ -177,7 +208,6 @@ func runGatewayUI(handler *app, settings uiSettings, path string, shutdown func(
 									dcl.CheckBox{
 										AssignTo: &ui.raceCheck,
 										Text:     "并行竞速：同一请求同时发往多个出口（手动+在线池+直连），最快返回者胜出，无需再设超长超时",
-										Checked:  settings.RaceEnabled,
 									},
 									dcl.Label{Text: "上游镜像（一行一个，请求间轮换；留空只用 opencode.ai）:"},
 									dcl.TextEdit{
@@ -189,9 +219,9 @@ func runGatewayUI(handler *app, settings uiSettings, path string, shutdown func(
 									dcl.Composite{
 										Layout: dcl.HBox{MarginsZero: true},
 										Children: []dcl.Widget{
-											dcl.PushButton{Text: "保存并重启", OnClicked: ui.onSave},
-											dcl.PushButton{Text: "仅检查格式", OnClicked: ui.onValidate},
-											dcl.PushButton{Text: "打开配置目录", OnClicked: ui.onOpenFolder},
+											dcl.PushButton{Text: "保存并重启", Font: uiFont, OnClicked: ui.onSave},
+											dcl.PushButton{Text: "仅检查格式", Font: uiFont, OnClicked: ui.onValidate},
+											dcl.PushButton{Text: "打开配置目录", Font: uiFont, OnClicked: ui.onOpenFolder},
 											dcl.HSpacer{},
 										},
 									},
@@ -200,12 +230,12 @@ func runGatewayUI(handler *app, settings uiSettings, path string, shutdown func(
 
 							dcl.GroupBox{
 								Title:  "在线节点池",
-								Layout: dcl.VBox{},
+								Font:   uiFont,
+								Layout: dcl.VBox{Spacing: 6},
 								Children: []dcl.Widget{
 									dcl.CheckBox{
 										AssignTo: &ui.poolCheck,
 										Text:     "自动拉取在线节点并探活（每轮用真实 opencode.ai 请求测活，健康节点实时入池、失效自动移除，无需重启）",
-										Checked:  settings.PoolEnabled,
 									},
 									dcl.Label{Text: "节点源链接（一行一个；支持 socks5/http 文本列表、amux JSON、base64 订阅链接（机场订阅，自动解码出 vless/vmess/hy2 等节点）、明文分享链接；github 页面链接自动转 raw）:"},
 									dcl.TextEdit{
@@ -221,7 +251,7 @@ func runGatewayUI(handler *app, settings uiSettings, path string, shutdown func(
 
 					{
 						Title:  "实时日志",
-						Layout: dcl.VBox{},
+						Layout: dcl.VBox{Spacing: 6},
 						Children: []dcl.Widget{
 							dcl.TextEdit{
 								AssignTo: &ui.logEdit,
@@ -229,6 +259,7 @@ func runGatewayUI(handler *app, settings uiSettings, path string, shutdown func(
 								VScroll:  true,
 								HScroll:  true,
 								MinSize:  dcl.Size{Height: 320},
+								Font:     monoFont,
 							},
 						},
 					},
@@ -274,8 +305,50 @@ func runGatewayUI(handler *app, settings uiSettings, path string, shutdown func(
 // tick 刷新日志与状态，必须在 UI 线程调用。
 func (ui *gatewayUI) tick() {
 	ui.pumpLogs()
+	ui.refreshHeadline()
 	ui.refreshStatus()
 	ui.refreshPoolLive()
+}
+
+// refreshHeadline 更新顶部大号状态行与窗口标题，一眼读出全局状态；
+// 颜色反映最近一次请求结果，内容没变化就不重绘。
+func (ui *gatewayUI) refreshHeadline() {
+	gw := ui.app.gateway
+	color := colorOK
+	if truncAt := gw.lastTruncation.Load(); truncAt != 0 && time.Since(time.Unix(0, truncAt)) < 2*time.Minute {
+		color = colorWarn
+	} else {
+		switch status := gw.lastStatus.Load(); {
+		case status == 0:
+			color = colorIdle
+		case status >= 200 && status < 400:
+			color = colorOK
+		case status == http.StatusTooManyRequests || status >= 500:
+			color = colorWarn
+		default:
+			color = colorError
+		}
+	}
+	modelCount := 0
+	if ui.modelsSeen != "" {
+		modelCount = strings.Count(ui.modelsSeen, "\r\n") + 1
+	}
+	race := "关"
+	if gw.cfg.raceEnabled {
+		race = "开"
+	}
+	text := fmt.Sprintf("● 运行中   :%d   出口 %d   模型 %d   竞速 %s",
+		gw.cfg.port, gw.customCount(), modelCount, race)
+	if text != ui.headlineText || color != ui.headlineColor {
+		ui.headlineText = text
+		ui.headlineColor = color
+		ui.headline.SetText(text)
+		ui.headline.SetTextColor(color)
+	}
+	if title := "opencode-free-gate ● 运行中"; title != ui.titleText {
+		ui.titleText = title
+		_ = ui.window.SetTitle(title)
+	}
 }
 
 // refreshPoolLive 把当前节点池明细同步到界面；内容没变化就不重绘，几乎零开销。
@@ -340,7 +413,7 @@ func (ui *gatewayUI) refreshStatus() {
 		sources := parsePoolSources(ui.settings.PoolInput)
 		poolInfo = fmt.Sprintf("     节点池 %d 源自动探活", len(sources))
 	}
-	text := fmt.Sprintf("● 运行中     端口 %d     %s%s     上游 %d 个轮换",
+	text := fmt.Sprintf("端口 %d     %s%s     上游 %d 个轮换",
 		gw.cfg.port, mode, poolInfo, len(gw.cfg.upstreamPool()))
 	// 内容没变化就不重绘，避免高频 SetText 打扰 UI 线程。
 	if text == ui.statusText {

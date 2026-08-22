@@ -36,7 +36,7 @@ jobs:
       # with_quic 启用 hysteria2/tuic，with_utls 启用 reality/uTLS 指纹
       - name: Build GUI exe
         run: |
-          go run github.com/tc-hib/go-winres@v0.3.3 simply --icon app.ico --manifest gui --arch amd64
+          go run github.com/tc-hib/go-winres@v0.3.3 simply --icon app.ico --manifest gui.manifest --arch amd64
           go build -trimpath -tags "with_quic,with_utls,with_gvisor" -ldflags "-s -w -H windowsgui -X main.uiMode=gui" -o opencode-free-gate-gui.exe .
           Remove-Item -Path *.syso -Force
 

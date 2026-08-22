@@ -97,6 +97,9 @@ type gateway struct {
 	manualAdv []string // 手动高级链接（桥接重建时必须保留）
 
 	exits *exitTracker // 出口近期表现记账：评分排序 + 坐板凳
+
+	lastStatus     atomic.Int32 // 最近一次请求的最终状态码，供界面健康色
+	lastTruncation atomic.Int64 // 最近一次流截断时刻（UnixNano），供界面健康色
 }
 
 func newGateway(cfg config) *gateway {
@@ -1387,6 +1390,7 @@ func (g *gateway) dispatchRace(ctx context.Context, request upstreamRequest, tra
 
 // noteStreamTruncation 记一次流中途夭折：出口记截断降权，所属镜像按失败记账。
 func (g *gateway) noteStreamTruncation(addr, upstream string) {
+	g.lastTruncation.Store(time.Now().UnixNano())
 	if trackableExit(addr) {
 		g.exits.observeTruncation(addr)
 	}

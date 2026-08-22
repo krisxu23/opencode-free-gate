@@ -536,6 +536,7 @@ func (a *app) finish(w http.ResponseWriter, r *http.Request, trace *requestTrace
 
 func (a *app) logCompletion(r *http.Request, trace *requestTrace) {
 	status := trace.finalStatus
+	a.gateway.lastStatus.Store(int32(status))
 	result := "完成"
 	if status < 200 || status >= 400 {
 		result = "失败"
