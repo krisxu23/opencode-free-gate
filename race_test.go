@@ -111,13 +111,25 @@ func TestDispatchRaceWinnerStreamStaysAlive(t *testing.T) {
 
 	// 返回之后流必须还能读出赢家已推送的数据。
 	buf := make([]byte, 32)
-	_ = resp.live.response.Body.SetReadDeadline(time.Now().Add(3 * time.Second))
-	n, readErr := resp.live.response.Body.Read(buf)
-	if readErr != nil || n == 0 {
-		t.Fatalf("winner stream was killed after return: n=%d err=%v", n, readErr)
+	type readOutcome struct {
+		n   int
+		err error
 	}
-	if !strings.Contains(string(buf[:n]), "data: first") {
-		t.Fatalf("unexpected stream content: %q", string(buf[:n]))
+	ch := make(chan readOutcome, 1)
+	go func() {
+		n, readErr := resp.live.response.Body.Read(buf)
+		ch <- readOutcome{n, readErr}
+	}()
+	select {
+	case out := <-ch:
+		if out.err != nil || out.n == 0 {
+			t.Fatalf("winner stream was killed after return: n=%d err=%v", out.n, out.err)
+		}
+		if !strings.Contains(string(buf[:out.n]), "data: first") {
+			t.Fatalf("unexpected stream content: %q", string(buf[:out.n]))
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("stream unreadable 3s after return - likely cancelled by race cleanup")
 	}
 	resp.live.Close()
 }
