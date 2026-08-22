@@ -734,8 +734,9 @@ func openHTTP(ctx context.Context, method, target string, headers http.Header, b
 		cancel()
 	})
 
-	// Transport 由共享连接池按「代理+超时」复用，连接不再逐请求重建；
-	// 归还与回收由 transportpool 管理，这里不做 CloseIdleConnections。
+	// Transport 由共享连接池按「代理+超时」复用；成功路径的连接归还与闲置
+	// 回收由 transportpool 管理。失败路径仍会 CloseIdleConnections 终止被
+	// 放弃的拨号（见下方 client.Do 的错误分支）。
 	transport := sharedTransports.get(proxyURL, connectTimeout, responseHeaderTimeout)
 	client := &http.Client{
 		Transport: transport,
@@ -758,6 +759,11 @@ func openHTTP(ctx context.Context, method, target string, headers http.Header, b
 	stopped := timer.Stop()
 	if err != nil {
 		cancel()
+		// Go 1.24.x 把拨号（含代理 CONNECT 握手）与请求 ctx 解耦：请求被
+		// 取消后进行中的拨号仍会继续。CloseIdleConnections 会终止这些已被
+		// 放弃的拨号（不影响使用中的连接），否则卡死的代理会泄漏连接到
+		// CONNECT 超时（最长 1 分钟）。
+		transport.CloseIdleConnections()
 		select {
 		case <-timedOut:
 			return nil, errAttemptTimeout
@@ -772,6 +778,7 @@ func openHTTP(ctx context.Context, method, target string, headers http.Header, b
 		<-timedOut
 		_ = res.Body.Close()
 		cancel()
+		transport.CloseIdleConnections()
 		return nil, errAttemptTimeout
 	}
 	return &liveResponse{response: res, cancel: cancel}, nil
