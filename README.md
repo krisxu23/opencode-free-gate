@@ -50,6 +50,22 @@ opencode.ai/zen ＋ 3 个公共 CDN 镜像
 
 3. 在 opencode 里切换到 FreeGate 的任意模型发消息即可。可用模型以网关界面的「免费模型」区为准。
 
+## 推荐的公共节点源（可选）
+
+程序不再内置任何节点池源。想体验「在线节点池」的话，可以把下面的公共免费代理列表填入 设置 → 节点源链接（一行一个），仅作推荐、随时可换可删：
+
+```
+https://proxy.amux.ai/api/proxies
+https://raw.githubusercontent.com/watchttvv/free-proxy-list/refs/heads/main/proxy.txt
+https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt
+https://bestcf.pages.dev/s5gy/all.txt
+https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt
+https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5.txt
+https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt
+```
+
+> 这些是公共免费代理聚合列表，可用率通常很低（<1%），仅适合配合并行竞速当备胎；有自己的订阅链接或节点请优先用它们。
+
 ## API 路由
 
 | 客户端类型 | 路由 |

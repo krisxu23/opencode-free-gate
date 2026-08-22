@@ -171,11 +171,14 @@ func TestNormalizedKeepsEmptyPoolInput(t *testing.T) {
 	}
 }
 
-// 全新安装仍应预填默认源。
-func TestDefaultSettingsPrefillPoolInput(t *testing.T) {
+// 全新安装不再预填节点池源（公共推荐源已移至 README）。
+func TestDefaultSettingsPoolInputEmpty(t *testing.T) {
 	s := defaultSettings()
-	if !strings.Contains(s.PoolInput, "proxy.amux.ai") {
-		t.Fatalf("默认源缺失: %q", s.PoolInput)
+	if strings.TrimSpace(s.PoolInput) != "" {
+		t.Fatalf("新装不应预填节点池源，实际 %q", s.PoolInput)
+	}
+	if len(s.Mirrors) != 3 {
+		t.Fatalf("应仅内置 3 条镜像，实际 %d: %v", len(s.Mirrors), s.Mirrors)
 	}
 }
 

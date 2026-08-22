@@ -32,16 +32,7 @@ type uiSettings struct {
 	RaceEnabled      bool     `json:"race_enabled"`       // 并行竞速开关
 }
 
-// defaultPoolSources 是在线节点池的预填源列表。
-var defaultPoolSources = []string{
-	"https://proxy.amux.ai/api/proxies",
-	"https://raw.githubusercontent.com/watchttvv/free-proxy-list/refs/heads/main/proxy.txt",
-	"https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt",
-	"https://bestcf.pages.dev/s5gy/all.txt",
-	"https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
-	"https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5.txt",
-	"https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt",
-}
+// 节点池默认源已移除：新装用户节点池为空，公共推荐源见 README。
 
 func defaultSettings() uiSettings {
 	return uiSettings{
@@ -55,7 +46,7 @@ func defaultSettings() uiSettings {
 		BudgetSeconds:    180,
 		GatewayKey:       defaultGatewayKey,
 		PoolEnabled:      false,
-		PoolInput:        strings.Join(defaultPoolSources, "\r\n"),
+		PoolInput:        "",
 		RaceEnabled:      true,
 	}
 }
@@ -102,8 +93,7 @@ func (s uiSettings) normalized() uiSettings {
 	if strings.TrimSpace(s.GatewayKey) == "" {
 		s.GatewayKey = defaultGatewayKey
 	}
-	// PoolInput 允许为空：默认源只在全新安装（defaultSettings）时预填，
-	// 用户清空保存后保持为空，不再自动回填。
+	// PoolInput 允许为空：节点池源完全由用户填写（公共推荐源见 README）。
 	if len(s.Proxies) == 0 && strings.TrimSpace(s.ProxyInput) != "" {
 		s.Proxies, _ = ParseProxyInput(s.ProxyInput)
 	}
