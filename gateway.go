@@ -284,7 +284,7 @@ func (g *gateway) initCustomSlots(ctx context.Context) error {
 	// 高级协议链接（vless/vmess/trojan/ss/hysteria2/tuic）先交给内嵌
 	// sing-box 转成本地 socks5 端点，再与普通节点一起走原有流程。
 	g.advBridge = g.startAdvancedBridgeFrom(g.cfg.customProxies)
-	parsed := parseCustomProxies(g.cfg.customProxies)
+	parsed := g.parseCustomProxies(g.cfg.customProxies)
 	if len(parsed) == 0 {
 		return nil
 	}
@@ -382,6 +382,10 @@ func (g *gateway) parseCustomProxies(raw string) []slot {
 		}
 		if schemeEnd := strings.Index(part, "://"); schemeEnd > 0 {
 			if _, adv := isAdvancedScheme(part[:schemeEnd]); adv {
+				if g.advBridge == nil {
+					log.Printf("[配置] 高级节点暂不可用: %s", redactProxy(part))
+					continue
+				}
 				local, ok := g.advBridge.Links[part]
 				if !ok {
 					log.Printf("[配置] 高级节点暂不可用: %s", redactProxy(part))

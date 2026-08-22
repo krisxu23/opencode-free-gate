@@ -24,19 +24,20 @@ jobs:
           go mod download
 
       - name: Run tests
-        run: go test ./...
+        run: go test -tags "with_quic,with_utls,with_gvisor" ./...
 
       # 界面版：用 go-winres simply 一次性嵌入图标 + GUI清单
+      # with_quic 启用 hysteria2/tuic，with_utls 启用 reality/uTLS 指纹
       - name: Build GUI exe
         run: |
           go run github.com/tc-hib/go-winres@latest simply --icon app.ico --manifest gui --arch amd64
-          go build -trimpath -ldflags "-s -w -H windowsgui -X main.uiMode=gui" -o opencode-free-gate-gui.exe .
+          go build -trimpath -tags "with_quic,with_utls,with_gvisor" -ldflags "-s -w -H windowsgui -X main.uiMode=gui" -o opencode-free-gate-gui.exe .
           Remove-Item -Path *.syso -Force
 
       # 控制台版：无图标无清单
       - name: Build console exe
         run: |
-          go build -trimpath -ldflags "-s -w -X main.uiMode=console" -o opencode-free-gate-console.exe .
+          go build -trimpath -tags "with_quic,with_utls,with_gvisor" -ldflags "-s -w -X main.uiMode=console" -o opencode-free-gate-console.exe .
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
