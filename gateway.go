@@ -44,12 +44,13 @@ type slot struct {
 }
 
 type requestTrace struct {
-	start       time.Time
-	attempts    int
-	proxies     map[string]struct{}
-	finalProxy  string
-	finalStatus int
-	upstream    string
+	start          time.Time
+	attempts       int
+	proxies        map[string]struct{}
+	finalProxy     string
+	finalStatus    int
+	upstream       string
+	winnerUpstream string // 竞速赢家实际使用的上游基址（完整 URL），供镜像记账
 }
 
 func newRequestTrace() *requestTrace {
@@ -667,6 +668,7 @@ type liveResponse struct {
 	response *http.Response
 	cancel   context.CancelFunc
 	once     sync.Once
+	headerAt time.Time // 响应头到达时刻，用于胜出日志拆解排队/首数据耗时
 }
 
 func (r *liveResponse) Close() {
@@ -785,7 +787,7 @@ func openHTTP(ctx context.Context, method, target string, headers http.Header, b
 		transport.CloseIdleConnections()
 		return nil, errAttemptTimeout
 	}
-	return &liveResponse{response: res, cancel: cancel}, nil
+	return &liveResponse{response: res, cancel: cancel, headerAt: time.Now()}, nil
 }
 
 func requestTransport(proxyURL *url.URL) *http.Transport {
@@ -953,7 +955,12 @@ func (g *gateway) dispatch(ctx context.Context, request upstreamRequest, trace *
 			continue
 		}
 		if !retryableStatus(response.status) {
-			g.noteUpstreamResult(current.upstream, true)
+			// 竞速模式下赢家可能走的是另一个镜像：以实际赢家为准记账。
+			base := trace.winnerUpstream
+			if base == "" {
+				base = current.upstream
+			}
+			g.noteUpstreamResult(base, true)
 			return response, nil
 		}
 		g.noteUpstreamResult(current.upstream, false)
@@ -1165,12 +1172,34 @@ const (
 func (g *gateway) dispatchRace(ctx context.Context, request upstreamRequest, trace *requestTrace) (*gatewayResponse, error) {
 	exits := g.raceExits()
 
+	// 镜像分散：出口轮流指到主上游与各镜像，一笔请求同时探多个镜像的
+	// 队列，避免整个竞速被单一镜像的慢速拖死。起点跟随 dispatch 已轮换
+	// 到的镜像，保持整体轮换公平。
+	mirrors := g.cfg.upstreamPool()
+	rotate := 0
+	if request.upstream != "" {
+		for i, base := range mirrors {
+			if base == request.upstream {
+				rotate = i
+				break
+			}
+		}
+	}
+	ordinal := 0
+	nextUpstream := func() string {
+		base := mirrors[(rotate+ordinal)%len(mirrors)]
+		ordinal++
+		return base
+	}
+
 	type raceResult struct {
-		addr     string
-		isDirect bool
-		resp     *gatewayResponse
-		err      error
-		elapsed  time.Duration
+		addr          string
+		isDirect      bool
+		upstream      string
+		resp          *gatewayResponse
+		err           error
+		elapsed       time.Duration
+		headerElapsed time.Duration
 	}
 	results := make(chan raceResult, len(exits)+2)
 
@@ -1180,18 +1209,26 @@ func (g *gateway) dispatchRace(ctx context.Context, request upstreamRequest, tra
 	launch := func(addr string, direct bool, proxyURL *url.URL) {
 		id := nextID
 		nextID++
+		attempt := request
+		attempt.upstream = nextUpstream()
 		attemptCtx, cancel := context.WithCancel(ctx)
 		inFlightMu.Lock()
 		inFlight[id] = cancel
 		inFlightMu.Unlock()
 		go func() {
 			started := time.Now()
-			resp, err := g.perform(attemptCtx, request, proxyURL)
+			resp, err := g.perform(attemptCtx, attempt, proxyURL)
 			elapsed := time.Since(started)
+			var headerElapsed time.Duration
+			if resp != nil && resp.live != nil && !resp.live.headerAt.IsZero() {
+				if wait := resp.live.headerAt.Sub(started); wait > 0 {
+					headerElapsed = wait
+				}
+			}
 			inFlightMu.Lock()
 			delete(inFlight, id)
 			inFlightMu.Unlock()
-			results <- raceResult{addr: addr, isDirect: direct, resp: resp, err: err, elapsed: elapsed}
+			results <- raceResult{addr: addr, isDirect: direct, upstream: attempt.upstream, resp: resp, err: err, elapsed: elapsed, headerElapsed: headerElapsed}
 			// 释放本路 context；仍在传输的流式响应除外（那由 live.Close 终结，
 			// 提前取消会掐断赢家/兜底的流）。
 			if resp == nil || resp.live == nil {
@@ -1255,6 +1292,7 @@ func (g *gateway) dispatchRace(ctx context.Context, request upstreamRequest, tra
 
 	var last *gatewayResponse
 	var lastAddr string
+	var lastUpstream string
 	received := 0
 	for received < launchedCount() || hedgeCh != nil {
 		select {
@@ -1270,7 +1308,9 @@ func (g *gateway) dispatchRace(ctx context.Context, request upstreamRequest, tra
 					g.noteCustomResult(res.addr, false)
 					if errors.Is(res.err, errStreamTruncated) {
 						g.exits.observeTruncation(res.addr)
-						log.Printf("[流截断] %s 返回空流，换下一出口", res.addr)
+						// 空流是上游侧行为，镜像一并记账。
+						g.noteUpstreamResult(res.upstream, false)
+						log.Printf("[流截断] %s 返回空流，换下一出口（镜像 %s）", res.addr, shortUpstream(res.upstream))
 					} else {
 						g.exits.observeFail(res.addr)
 					}
@@ -1282,6 +1322,7 @@ func (g *gateway) dispatchRace(ctx context.Context, request upstreamRequest, tra
 				if last == nil {
 					last = res.resp
 					lastAddr = res.addr
+					lastUpstream = res.upstream
 				} else {
 					res.resp.live.Close()
 				}
@@ -1299,8 +1340,18 @@ func (g *gateway) dispatchRace(ctx context.Context, request upstreamRequest, tra
 				g.noteCustomResult(res.addr, true)
 				g.exits.observeWin(res.addr, res.elapsed)
 			}
-			log.Printf("[竞速] 胜出: %s (%s)", res.addr, res.elapsed.Round(time.Millisecond))
 			trace.finalProxy = res.addr
+			trace.upstream = shortUpstream(res.upstream)
+			trace.winnerUpstream = res.upstream
+			if res.resp.live != nil && res.headerElapsed > 0 {
+				log.Printf("[竞速] 胜出: %s | 镜像:%s | 总耗时 %s（到响应头 %s + 到首数据 %s）",
+					res.addr, trace.upstream,
+					res.elapsed.Round(time.Millisecond),
+					res.headerElapsed.Round(time.Millisecond),
+					(res.elapsed-res.headerElapsed).Round(time.Millisecond))
+			} else {
+				log.Printf("[竞速] 胜出: %s (%s)", res.addr, res.elapsed.Round(time.Millisecond))
+			}
 			go func() {
 				deadline := time.After(40 * time.Second) // 覆盖最长的首字节超时窗口
 				for {
@@ -1327,6 +1378,8 @@ func (g *gateway) dispatchRace(ctx context.Context, request upstreamRequest, tra
 	if last != nil {
 		log.Printf("[竞速] 无健康出口，使用可重试兜底响应: %s", lastAddr)
 		trace.finalProxy = lastAddr
+		trace.upstream = shortUpstream(lastUpstream)
+		trace.winnerUpstream = lastUpstream
 		return last, nil
 	}
 	return nil, errNoProxy
