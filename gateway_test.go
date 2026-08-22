@@ -37,7 +37,7 @@ func TestOpenHTTPTimeoutClosesProxyConnection(t *testing.T) {
 
 	proxyURL, _ := url.Parse("http://" + listener.Addr().String())
 	started := time.Now()
-	_, err = openHTTP(context.Background(), http.MethodGet, "https://example.invalid/v1/models", http.Header{}, nil, proxyURL, 100*time.Millisecond, 100*time.Millisecond, 100*time.Millisecond)
+	_, err = openHTTP(context.Background(), http.MethodGet, "https://example.invalid/v1/models", http.Header{}, nil, proxyURL, 100*time.Millisecond)
 	if !errors.Is(err, errAttemptTimeout) {
 		t.Fatalf("expected attempt timeout, got %v", err)
 	}
@@ -151,7 +151,7 @@ func TestNonStreamIgnoresFirstByteTimeout(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"stream":false}`))
 	trace := newRequestTrace()
 
-	response, err := application.handlePost(httptest.NewRecorder(), request, "/v1/chat/completions", trace.start.Add(cfg.hardTimeout), trace)
+	response, _, err := application.handlePost(httptest.NewRecorder(), request, "/v1/chat/completions", trace.start.Add(cfg.hardTimeout), trace)
 	if err != nil {
 		t.Fatalf("non-stream request should outlive the first-byte timeout: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestStreamStillHonorsFirstByteTimeout(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"stream":true}`))
 	trace := newRequestTrace()
 
-	_, err := application.handlePost(httptest.NewRecorder(), request, "/v1/chat/completions", trace.start.Add(cfg.hardTimeout), trace)
+	_, _, err := application.handlePost(httptest.NewRecorder(), request, "/v1/chat/completions", trace.start.Add(cfg.hardTimeout), trace)
 	if !errors.Is(err, errAttemptTimeout) {
 		t.Fatalf("expected stream first-byte timeout, got %v", err)
 	}
@@ -209,7 +209,7 @@ func TestNonStreamStopsAtConfiguredMaximum(t *testing.T) {
 	trace := newRequestTrace()
 	started := time.Now()
 
-	_, err := application.handlePost(httptest.NewRecorder(), request, "/v1/chat/completions", trace.start.Add(cfg.hardTimeout), trace)
+	_, _, err := application.handlePost(httptest.NewRecorder(), request, "/v1/chat/completions", trace.start.Add(cfg.hardTimeout), trace)
 	if !errors.Is(err, errRequestTimeout) {
 		t.Fatalf("expected non-stream total timeout, got %v", err)
 	}

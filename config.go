@@ -47,6 +47,11 @@ type config struct {
 // （兼容自签证书的镜像/代理环境），默认严格校验。
 var upstreamTLSInsecure bool
 
+// transportDialTimeout 是共享连接池统一的拨号/TLS 握手超时。每请求的精确
+// 截止由 openHTTP 自己的计时器兜底，这里只需一个宽松的固定值（随首字节
+// 超时配置初始化），从而让池的键只依赖代理地址——探活即预热竞速连接。
+var transportDialTimeout = 30 * time.Second
+
 func loadConfig(project projectSpec) config {
 	upstreamTLSInsecure = envIsOn(os.Getenv("INSECURE_TLS"))
 	mode := strings.ToLower(strings.TrimSpace(os.Getenv("PROXY_MODE")))
@@ -61,6 +66,9 @@ func loadConfig(project projectSpec) config {
 	if slotCount > 5 {
 		slotCount = 5
 	}
+
+	firstByte := envMilliseconds("PROXY_FIRST_BYTE_TIMEOUT", 30000)
+	transportDialTimeout = firstByte
 
 	return config{
 		project:          project,
@@ -80,12 +88,12 @@ func loadConfig(project projectSpec) config {
 		zenKey:           os.Getenv("ZENPROXY_KEY"),
 		forceRelay:       os.Getenv("FORCE_RELAY") == "1",
 		gatewayKey:       os.Getenv("GATEWAY_KEY"),
-		firstByteTimeout: envMilliseconds("PROXY_FIRST_BYTE_TIMEOUT", 30000),
+		firstByteTimeout: firstByte,
 		hardTimeout:      envMilliseconds("HARD_TIMEOUT", 180000),
 		nonStreamTimeout: envMilliseconds("NON_STREAM_TIMEOUT", 300000),
 		probeTimeout:     envMilliseconds("PROXY_PROBE_TIMEOUT", 8000),
 		refreshInterval:  envMilliseconds("PROXY_REFRESH_MS", 300000),
-		streamIdle:       300 * time.Second,
+		streamIdle:       envMilliseconds("STREAM_IDLE_TIMEOUT", 300000),
 		raceEnabled:      envIsOn(envString("PROXY_RACE", "1")),
 		raceWidth:        nonNegative(envInt("PROXY_RACE_WIDTH", 8)),
 	}

@@ -699,32 +699,22 @@ func (g *gateway) openUpstream(ctx context.Context, request upstreamRequest, pro
 		base = g.cfg.project.upstream
 	}
 	target := strings.TrimRight(base, "/") + request.path
-	wait, connectTimeout, responseHeaderTimeout := g.openTimeouts(request.deadline, maxWait)
-	return openHTTP(ctx, request.method, target, request.headers, request.body, proxyURL, wait, connectTimeout, responseHeaderTimeout)
+	wait := g.openTimeouts(request.deadline, maxWait)
+	return openHTTP(ctx, request.method, target, request.headers, request.body, proxyURL, wait)
 }
 
-func (g *gateway) openTimeouts(deadline time.Time, firstByteLimit time.Duration) (time.Duration, time.Duration, time.Duration) {
+// openTimeouts 返回本次尝试的总体预算：首字节受限的请求取 min(剩余预算, 首字节上限)，
+// 非流式请求取完整剩余预算。拨号/响应头的精确截止都由这个预算计时器兜底。
+func (g *gateway) openTimeouts(deadline time.Time, firstByteLimit time.Duration) time.Duration {
 	if firstByteLimit > 0 {
-		wait := boundedWait(deadline, firstByteLimit)
-		return wait, wait, wait
+		return boundedWait(deadline, firstByteLimit)
 	}
-	wait := boundedWait(deadline, 0)
-	connectTimeout := boundedWait(deadline, g.cfg.firstByteTimeout)
-	return wait, connectTimeout, 0
+	return boundedWait(deadline, 0)
 }
 
-func openHTTP(ctx context.Context, method, target string, headers http.Header, body []byte, proxyURL *url.URL, wait, connectTimeout, responseHeaderTimeout time.Duration) (*liveResponse, error) {
+func openHTTP(ctx context.Context, method, target string, headers http.Header, body []byte, proxyURL *url.URL, wait time.Duration) (*liveResponse, error) {
 	if wait <= 0 {
 		return nil, errRequestTimeout
-	}
-	if connectTimeout <= 0 || connectTimeout > wait {
-		connectTimeout = wait
-	}
-	if responseHeaderTimeout < 0 {
-		responseHeaderTimeout = 0
-	}
-	if responseHeaderTimeout > wait {
-		responseHeaderTimeout = wait
 	}
 
 	attemptContext, cancel := context.WithCancel(ctx)
@@ -734,10 +724,9 @@ func openHTTP(ctx context.Context, method, target string, headers http.Header, b
 		cancel()
 	})
 
-	// Transport 由共享连接池按「代理+超时」复用；成功路径的连接归还与闲置
-	// 回收由 transportpool 管理。失败路径仍会 CloseIdleConnections 终止被
-	// 放弃的拨号（见下方 client.Do 的错误分支）。
-	transport := sharedTransports.get(proxyURL, connectTimeout, responseHeaderTimeout)
+	// Transport 由共享连接池按代理复用；成功路径的连接归还与闲置回收由
+	// transportpool 管理。失败路径仍会 CloseIdleConnections 终止被放弃的拨号。
+	transport := sharedTransports.get(proxyURL)
 	client := &http.Client{
 		Transport: transport,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
@@ -784,10 +773,10 @@ func openHTTP(ctx context.Context, method, target string, headers http.Header, b
 	return &liveResponse{response: res, cancel: cancel}, nil
 }
 
-func requestTransport(proxyURL *url.URL, connectTimeout, responseHeaderTimeout time.Duration) *http.Transport {
+func requestTransport(proxyURL *url.URL) *http.Transport {
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
-			Timeout:   connectTimeout,
+			Timeout:   transportDialTimeout,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 		ForceAttemptHTTP2:      false,
@@ -795,8 +784,7 @@ func requestTransport(proxyURL *url.URL, connectTimeout, responseHeaderTimeout t
 		MaxIdleConns:           128,
 		MaxIdleConnsPerHost:    4,
 		IdleConnTimeout:        90 * time.Second,
-		TLSHandshakeTimeout:    connectTimeout,
-		ResponseHeaderTimeout:  responseHeaderTimeout,
+		TLSHandshakeTimeout:    transportDialTimeout,
 		ExpectContinueTimeout:  time.Second,
 		MaxResponseHeaderBytes: 1 << 20,
 		TLSClientConfig: &tls.Config{
@@ -1076,45 +1064,65 @@ func (g *gateway) raceExits() []slot {
 }
 
 // dispatchRace 并行竞速：同一请求同时发往多个出口（手动节点、在线池节点、直连），
-// 最先给出可用响应的通道胜出，其余通道立即取消。
+// 最先给出可用响应的通道胜出。每路出口使用独立 context，因此赢家出现后可以
+// 立刻取消仍在途的输家（释放上游连接与配额），而不会影响赢家已建立的流。
 // 客户端因此无需设置超长超时——等待由网关内部并行消化。
 func (g *gateway) dispatchRace(ctx context.Context, request upstreamRequest, trace *requestTrace) (*gatewayResponse, error) {
 	exits := g.raceExits()
 
 	type raceResult struct {
-		addr    string
+		addr     string
 		isDirect bool
-		resp    *gatewayResponse
-		err     error
+		resp     *gatewayResponse
+		err      error
 	}
-	raceCtx, cancel := context.WithCancel(ctx)
-	// 关键：胜出/兜底路径会把仍挂着数据流的响应交给调用方（流式响应的 body
-	// 就活在 raceCtx 的取消链上），所以这两条路径绝不能触发 cancel，
-	// 否则赢家刚返回流就被掐断，客户端表现为 Connection error。
 	results := make(chan raceResult, len(exits)+1)
+
+	// 每路出口独立 context + 取消注册表：赢家出现时只取消输家。
+	var inFlightMu sync.Mutex
+	inFlight := make(map[int]context.CancelFunc)
+	launch := func(id int, addr string, direct bool, proxyURL *url.URL) {
+		attemptCtx, cancel := context.WithCancel(ctx)
+		inFlightMu.Lock()
+		inFlight[id] = cancel
+		inFlightMu.Unlock()
+		go func() {
+			resp, err := g.perform(attemptCtx, request, proxyURL)
+			inFlightMu.Lock()
+			delete(inFlight, id)
+			inFlightMu.Unlock()
+			results <- raceResult{addr: addr, isDirect: direct, resp: resp, err: err}
+			// 释放本路 context；仍在传输的流式响应除外（那由 live.Close 终结，
+			// 提前取消会掐断赢家/兜底的流）。
+			if resp == nil || resp.live == nil {
+				cancel()
+			}
+		}()
+	}
+	cancelInFlight := func() {
+		inFlightMu.Lock()
+		for _, cancel := range inFlight {
+			cancel()
+		}
+		inFlightMu.Unlock()
+	}
 
 	const directAddr = "直连"
 	launched := 0
-	for _, s := range exits {
+	for i, s := range exits {
 		launched++
 		trace.addAttempt(s.addr)
-		go func(s slot) {
-			resp, err := g.perform(raceCtx, request, s.proxyURL)
-			results <- raceResult{addr: s.addr, resp: resp, err: err}
-		}(s)
+		launch(i, s.addr, false, s.proxyURL)
 	}
 	if g.cfg.project.directFallback {
 		launched++
 		trace.addAttempt(directAddr)
-		go func() {
-			resp, err := g.perform(raceCtx, request, nil)
-			results <- raceResult{addr: directAddr, isDirect: true, resp: resp, err: err}
-		}()
+		launch(len(exits), directAddr, true, nil)
 	}
 	log.Printf("[竞速] %d 路并行出发", launched)
 
 	var last *gatewayResponse
-	lastAddr := ""
+	var lastAddr string
 	for received := 0; received < launched; received++ {
 		res := <-results
 		if res.err != nil {
@@ -1122,7 +1130,7 @@ func (g *gateway) dispatchRace(ctx context.Context, request upstreamRequest, tra
 				g.noteCustomResult(res.addr, false)
 			}
 			if ctx.Err() != nil {
-				cancel()
+				cancelInFlight()
 				return nil, res.err
 			}
 			continue
@@ -1137,8 +1145,8 @@ func (g *gateway) dispatchRace(ctx context.Context, request upstreamRequest, tra
 			}
 			continue
 		}
-		// 赢家出现。不 cancel：在途败者等它们自己的首字节超时自然退场，
-		// 由下面的收割协程负责关闭迟到响应的连接，防止泄漏。
+		// 赢家出现：立即取消仍在途的输家；迟到的响应由收割协程关闭，防止泄漏。
+		cancelInFlight()
 		if last != nil {
 			last.live.Close()
 			last = nil
@@ -1168,7 +1176,6 @@ func (g *gateway) dispatchRace(ctx context.Context, request upstreamRequest, tra
 		trace.finalProxy = lastAddr
 		return last, nil
 	}
-	cancel()
 	return nil, errNoProxy
 }
 
@@ -1226,8 +1233,8 @@ func (g *gateway) performRelay(ctx context.Context, request upstreamRequest) (*g
 	if request.nonStream {
 		firstByteLimit = 0
 	}
-	wait, connectTimeout, responseHeaderTimeout := g.openTimeouts(request.deadline, firstByteLimit)
-	live, err := openHTTP(ctx, http.MethodPost, relay.String(), headers, request.body, nil, wait, connectTimeout, responseHeaderTimeout)
+	wait := g.openTimeouts(request.deadline, firstByteLimit)
+	live, err := openHTTP(ctx, http.MethodPost, relay.String(), headers, request.body, nil, wait)
 	if err != nil {
 		if errors.Is(err, errAttemptTimeout) && time.Until(request.deadline) <= 0 {
 			return nil, errRequestTimeout

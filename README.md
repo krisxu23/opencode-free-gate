@@ -15,7 +15,8 @@ opencode.ai/zen ＋ 3 个公共 CDN 镜像
 | 功能 | 说明 |
 |---|---|
 | **协议兼容** | OpenAI / Anthropic / Codex 三种路由，客户端零改造接入 |
-| **并行竞速** | 每次请求同时发往多个出口（手动节点＋池节点＋直连），最快返回者胜出 |
+| **并行竞速** | 每次请求同时发往多个出口（手动节点＋池节点＋直连），最快返回者胜出，赢家出现后立即取消其余在途请求 |
+| **SSE 保活** | 竞速超过 5 秒未决时自动提前提交 SSE 响应头并发送心跳注释行，客户端不会因等响应头而误判断线 |
 | **高级节点** | 内嵌 sing-box v1.13：`vless` `vmess` `trojan` `ss` `hysteria2(hy2)` `tuic` 分享链接直接粘贴，自动转为内部 SOCKS5 端点参与探活和竞速 |
 | **在线节点池** | 定时拉取节点源 → 真实请求探活 → 健康入池 / 失效自删；支持文本列表、JSON、**base64 订阅链接** |
 | **手动节点保护** | 手动填写的节点无条件保留、永不自动移除 |
@@ -119,6 +120,7 @@ https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt
 | `PROXY_RACE` / `PROXY_RACE_WIDTH` | `1` / `8` | 竞速开关 / 自动节点最大并发路数 |
 | `PROXY_FIRST_BYTE_TIMEOUT` | `30000` | 流式首字节超时（毫秒） |
 | `HARD_TIMEOUT` | `180000` | 流式总预算（毫秒） |
+| `STREAM_IDLE_TIMEOUT` | `300000` | 流式开始后上游静默多久算断流（毫秒），长思考模型可调大 |
 | `PROXY_ORDER` | 空 | 回退顺序；由 config.json 自动设为 `custom` 或 `direct` |
 | `INSECURE_TLS` | `0` | 置 `1` 跳过上游 TLS 证书校验（自签证书的镜像/代理环境用） |
 

@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -178,12 +179,12 @@ func (a *app) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	deadline := time.Now().Add(a.gateway.cfg.hardTimeout)
 	if path == "/v1/models" && r.Method == http.MethodGet {
 		response, err := a.handleModels(r.Context(), r.Header, pathWithQuery(path, r.URL.RawQuery), deadline, trace)
-		a.finish(w, r, trace, response, err)
+		a.finish(w, r, trace, response, err, nil)
 		return
 	}
 	if _, allowed := a.gateway.cfg.project.postPaths[path]; allowed && r.Method == http.MethodPost {
-		response, err := a.handlePost(w, r, pathWithQuery(path, r.URL.RawQuery), deadline, trace)
-		a.finish(w, r, trace, response, err)
+		response, guard, err := a.handlePost(w, r, pathWithQuery(path, r.URL.RawQuery), deadline, trace)
+		a.finish(w, r, trace, response, err, guard)
 		return
 	}
 
@@ -244,19 +245,19 @@ func (a *app) handleModels(ctx context.Context, sourceHeaders http.Header, path 
 	return a.gateway.dispatch(ctx, request, trace)
 }
 
-func (a *app) handlePost(w http.ResponseWriter, r *http.Request, path string, deadline time.Time, trace *requestTrace) (*gatewayResponse, error) {
+func (a *app) handlePost(w http.ResponseWriter, r *http.Request, path string, deadline time.Time, trace *requestTrace) (*gatewayResponse, *sseGuard, error) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			return jsonGatewayResponse(http.StatusRequestEntityTooLarge, "请求体过大"), nil
+			return jsonGatewayResponse(http.StatusRequestEntityTooLarge, "请求体过大"), nil, nil
 		}
 		var networkError net.Error
 		if errors.As(err, &networkError) && networkError.Timeout() {
-			return jsonGatewayResponse(http.StatusGatewayTimeout, "请求超时"), nil
+			return jsonGatewayResponse(http.StatusGatewayTimeout, "请求超时"), nil, nil
 		}
-		return jsonGatewayResponse(http.StatusBadRequest, "读取请求体失败"), nil
+		return jsonGatewayResponse(http.StatusBadRequest, "读取请求体失败"), nil, nil
 	}
 
 	payload := parseJSONObject(body)
@@ -294,7 +295,123 @@ func (a *app) handlePost(w http.ResponseWriter, r *http.Request, path string, de
 	if stream {
 		request.headers.Set("Accept", "text/event-stream")
 	}
-	return a.gateway.dispatch(r.Context(), request, trace)
+	// 流式请求配备 SSE 保活：竞速迟迟未决时提前提交响应头并周期发送
+	// 注释行心跳，客户端（ZCode 等工具）不会因等不到响应头而误判断线。
+	var guard *sseGuard
+	if stream {
+		guard = newSseGuard(w)
+	}
+	response, err := a.gateway.dispatch(r.Context(), request, trace)
+	if guard != nil {
+		guard.Finish()
+	}
+	return response, guard, err
+}
+
+const (
+	// sseCommitDelay 是竞速决出赢家的宽限期：正常请求（几乎都小于该值）
+	// 走原有路径，保留完整的状态码/错误重试语义；超过该值仍未决出赢家
+	// 才提前提交 SSE 头转入心跳模式。
+	sseCommitDelay = 5 * time.Second
+	// sseBeatInterval 是心跳注释行的发送间隔。
+	sseBeatInterval = 3 * time.Second
+)
+
+// sseGuard 让长时间竞速的流式请求在客户端看来始终“活着”。
+// 所有写入都在互斥锁内且先检查 done，因此 Finish 返回后保证不会再有
+// 任何写入，调用方可以安全接管 ResponseWriter。
+type sseGuard struct {
+	w         http.ResponseWriter
+	mu        sync.Mutex
+	done      bool
+	committed bool
+}
+
+func newSseGuard(w http.ResponseWriter) *sseGuard {
+	g := &sseGuard{w: w}
+	time.AfterFunc(sseCommitDelay, g.run)
+	return g
+}
+
+// run 由 AfterFunc 触发：提交 200 + SSE 头后按间隔发送心跳注释行，
+// 直到 Finish。SSE 规范里冒号开头的注释行会被所有客户端忽略。
+func (g *sseGuard) run() {
+	g.mu.Lock()
+	if g.done {
+		g.mu.Unlock()
+		return
+	}
+	g.committed = true
+	header := g.w.Header()
+	if header.Get("Content-Type") == "" {
+		header.Set("Content-Type", "text/event-stream; charset=utf-8")
+	}
+	header.Set("Cache-Control", "no-cache")
+	g.w.WriteHeader(http.StatusOK)
+	g.beatLocked()
+	for !g.done {
+		g.mu.Unlock()
+		time.Sleep(sseBeatInterval)
+		g.mu.Lock()
+		if g.done {
+			break
+		}
+		g.beatLocked()
+	}
+	g.mu.Unlock()
+}
+
+func (g *sseGuard) beatLocked() {
+	_, _ = io.WriteString(g.w, ": keep-alive\n\n")
+	if flusher, ok := g.w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// Finish 停止心跳；返回后不会再有任何写入。
+func (g *sseGuard) Finish() {
+	g.mu.Lock()
+	g.done = true
+	g.mu.Unlock()
+}
+
+func (g *sseGuard) Committed() bool {
+	if g == nil {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.committed
+}
+
+// writeCommittedStream 处理已提前提交 SSE 头的响应：赢家的流直接透传；
+// 其余情形（错误或非流式兜底）转为 SSE 错误事件，让客户端拿到明确原因。
+func writeCommittedStream(w http.ResponseWriter, r *http.Request, response *gatewayResponse, streamIdle time.Duration) {
+	if response.live != nil {
+		streamResponse(w, r.Context(), response.live, streamIdle)
+		return
+	}
+	message := "上游请求失败"
+	var payload map[string]any
+	if err := json.Unmarshal(response.body, &payload); err == nil {
+		switch value := payload["error"].(type) {
+		case string:
+			if value != "" {
+				message = value
+			}
+		case map[string]any:
+			if text, _ := value["message"].(string); text != "" {
+				message = text
+			}
+		}
+	}
+	body, _ := json.Marshal(map[string]any{
+		"error": map[string]any{"message": message, "code": response.status},
+	})
+	_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", body)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 // applyRequestIDs 用网关派生的标识覆盖发往上游的 OpenCode 头。
@@ -371,7 +488,7 @@ func ensureStream(body []byte, payload map[string]any) []byte {
 	return rewritten
 }
 
-func (a *app) finish(w http.ResponseWriter, r *http.Request, trace *requestTrace, response *gatewayResponse, err error) {
+func (a *app) finish(w http.ResponseWriter, r *http.Request, trace *requestTrace, response *gatewayResponse, err error, guard *sseGuard) {
 	if err != nil {
 		if r.Context().Err() != nil {
 			return
@@ -394,6 +511,11 @@ func (a *app) finish(w http.ResponseWriter, r *http.Request, trace *requestTrace
 		trace.finalProxy = "local"
 	}
 	a.logCompletion(r, trace)
+	if guard.Committed() {
+		// 响应头已提前提交，状态码无法再改变：赢家流透传，其余转为 SSE 错误事件。
+		writeCommittedStream(w, r, response, a.gateway.cfg.streamIdle)
+		return
+	}
 	writeGatewayResponse(w, r, response, a.gateway.cfg.streamIdle)
 }
 
