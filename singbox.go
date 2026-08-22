@@ -167,9 +167,12 @@ func (g *gateway) ensureAdvancedBridge(ctx context.Context, freshLinks []string)
 		return
 	}
 	old := g.advBridge
-	oldAddrs := make([]string, 0, len(old.Mapping))
-	for addr := range old.Mapping {
-		oldAddrs = append(oldAddrs, addr)
+	var oldAddrs []string
+	if old != nil {
+		oldAddrs = make([]string, 0, len(old.Mapping))
+		for addr := range old.Mapping {
+			oldAddrs = append(oldAddrs, addr)
+		}
 	}
 	g.advBridge = newBridge
 	g.advSeen = seenSet
@@ -193,6 +196,11 @@ func (g *gateway) ensureAdvancedBridge(ctx context.Context, freshLinks []string)
 	}
 	firstBuild := old == nil
 	g.advMu.Unlock()
+
+	// 旧实例在新实例接管后关闭，释放旧端口。
+	if old != nil {
+		old.Close()
+	}
 
 	// 迁移槽位：旧端口的槽位全部换绑到新端口。
 	for _, addr := range oldAddrs {
