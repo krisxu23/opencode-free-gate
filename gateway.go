@@ -802,6 +802,20 @@ func (g *gateway) dispatchOnce(ctx context.Context, request upstreamRequest, tra
 	}
 
 	var last *gatewayResponse
+	// 并行竞速模式：手动节点 + 轮选在线池节点 + 直连同时出发，最快返回者胜出。
+	// 仅直连模式（PROXY_ORDER=direct）不参与竞速。
+	if g.cfg.raceEnabled && g.customCount() > 0 {
+		skip := false
+		for _, layer := range g.cfg.orderedLayers() {
+			if layer == layerDirect {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			return g.dispatchRace(ctx, request, trace)
+		}
+	}
 	for _, layer := range g.cfg.orderedLayers() {
 		var response *gatewayResponse
 		var err error
@@ -929,6 +943,125 @@ func (g *gateway) dispatchCustomLayer(ctx context.Context, request upstreamReque
 	}
 	if last != nil {
 		trace.finalProxy = lastProxy
+		return last, nil
+	}
+	return nil, errNoProxy
+}
+
+// raceExits 组装竞速出口：手动节点全部参加，自动节点轮选补足宽度。
+func (g *gateway) raceExits() []slot {
+	all := g.customSnapshot()
+	var manual, auto []slot
+	for _, s := range all {
+		if g.isManual(s.addr) {
+			manual = append(manual, s)
+		} else {
+			auto = append(auto, s)
+		}
+	}
+	width := g.cfg.raceWidth
+	if width < 2 {
+		width = 2
+	}
+	exits := make([]slot, 0, len(manual)+width)
+	exits = append(exits, manual...)
+	if len(auto) > 0 {
+		start := int(g.rr.Add(1)-1) % len(auto)
+		for i := 0; i < len(auto) && len(exits) < width+len(manual); i++ {
+			exits = append(exits, auto[(start+i)%len(auto)])
+		}
+	}
+	return exits
+}
+
+// dispatchRace 并行竞速：同一请求同时发往多个出口（手动节点、在线池节点、直连），
+// 最先给出可用响应的通道胜出，其余通道立即取消。
+// 客户端因此无需设置超长超时——等待由网关内部并行消化。
+func (g *gateway) dispatchRace(ctx context.Context, request upstreamRequest, trace *requestTrace) (*gatewayResponse, error) {
+	exits := g.raceExits()
+
+	type raceResult struct {
+		addr    string
+		isDirect bool
+		resp    *gatewayResponse
+		err     error
+	}
+	raceCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan raceResult, len(exits)+1)
+
+	const directAddr = "直连"
+	launched := 0
+	for _, s := range exits {
+		launched++
+		trace.addAttempt(s.addr)
+		go func(s slot) {
+			resp, err := g.perform(raceCtx, request, s.proxyURL)
+			results <- raceResult{addr: s.addr, resp: resp, err: err}
+		}(s)
+	}
+	if g.cfg.project.directFallback {
+		launched++
+		trace.addAttempt(directAddr)
+		go func() {
+			resp, err := g.perform(raceCtx, request, nil)
+			results <- raceResult{addr: directAddr, isDirect: true, resp: resp, err: err}
+		}()
+	}
+	log.Printf("[竞速] %d 路并行出发", launched)
+
+	var last *gatewayResponse
+	lastAddr := ""
+	for received := 0; received < launched; received++ {
+		res := <-results
+		if res.err != nil {
+			if !res.isDirect {
+				g.noteCustomResult(res.addr, false)
+			}
+			if ctx.Err() != nil {
+				return nil, res.err
+			}
+			continue
+		}
+		if retryableStatus(res.resp.status) {
+			// 限流/5xx 不算赢家；留第一个作为全军覆没时的兜底，重复的直接关闭。
+			if last == nil {
+				last = res.resp
+				lastAddr = res.addr
+			} else {
+				res.resp.live.Close()
+			}
+			continue
+		}
+		// 赢家出现：取消其余在途请求，并异步收割迟到的响应防止连接泄漏。
+		cancel()
+		if last != nil {
+			last.live.Close()
+			last = nil
+		}
+		if !res.isDirect {
+			g.noteCustomResult(res.addr, true)
+		}
+		log.Printf("[竞速] 胜出: %s", res.addr)
+		trace.finalProxy = res.addr
+		go func() {
+			deadline := time.After(10 * time.Second)
+			for {
+				select {
+				case extra := <-results:
+					if extra.resp != nil {
+						extra.resp.live.Close()
+					}
+				case <-deadline:
+					return
+				}
+			}
+		}()
+		return res.resp, nil
+	}
+	if last != nil {
+		log.Printf("[竞速] 无健康出口，使用可重试兜底响应: %s", lastAddr)
+		trace.finalProxy = lastAddr
 		return last, nil
 	}
 	return nil, errNoProxy

@@ -30,6 +30,7 @@ type gatewayUI struct {
 	mirrorEdit   *walk.TextEdit
 	poolCheck    *walk.CheckBox
 	poolEdit     *walk.TextEdit
+	raceCheck    *walk.CheckBox
 	poolLive     *walk.TextEdit
 	apiEdit      *walk.LineEdit
 	keyEdit      *walk.LineEdit
@@ -171,6 +172,11 @@ func runGatewayUI(handler *app, settings uiSettings, path string, shutdown func(
 										Text:     settings.ProxyInput,
 										VScroll:  true,
 										MinSize:  dcl.Size{Height: 96},
+									},
+									dcl.CheckBox{
+										AssignTo: &ui.raceCheck,
+										Text:     "并行竞速：同一请求同时发往多个出口（手动+在线池+直连），最快返回者胜出，无需再设超长超时",
+										Checked:  settings.RaceEnabled,
 									},
 									dcl.Label{Text: "上游镜像（一行一个，请求间轮换；留空只用 opencode.ai）:"},
 									dcl.TextEdit{
@@ -378,6 +384,7 @@ func (ui *gatewayUI) collect() (uiSettings, string) {
 	next.MirrorInput = ui.mirrorEdit.Text()
 	next.PoolEnabled = ui.poolCheck.Checked()
 	next.PoolInput = ui.poolEdit.Text()
+	next.RaceEnabled = ui.raceCheck.Checked()
 
 	proxies, proxyErrors := ParseProxyInput(next.ProxyInput)
 	mirrors, mirrorErrors := parseMirrorList(next.MirrorInput)
@@ -399,6 +406,11 @@ func (ui *gatewayUI) collect() (uiSettings, string) {
 		fmt.Fprintf(&report, "在线节点池：开启，%d 个源（后台自动探活入池）\r\n", len(sources))
 	} else {
 		report.WriteString("在线节点池：关闭\r\n")
+	}
+	if next.RaceEnabled {
+		report.WriteString("并行竞速：开启（最快出口胜出）\r\n")
+	} else {
+		report.WriteString("并行竞速：关闭\r\n")
 	}
 	fmt.Fprintf(&report, "上游镜像：可用 %d 个", len(mirrors))
 	if len(mirrorErrors) > 0 {

@@ -29,6 +29,7 @@ type uiSettings struct {
 	GatewayKey       string   `json:"gateway_key"`        // 展示用的默认 Key
 	PoolEnabled      bool     `json:"pool_enabled"`       // 在线节点池开关
 	PoolInput        string   `json:"pool_input"`         // 节点源链接，回填输入框
+	RaceEnabled      bool     `json:"race_enabled"`       // 并行竞速开关
 }
 
 // defaultPoolSources 是在线节点池的预填源列表。
@@ -55,6 +56,7 @@ func defaultSettings() uiSettings {
 		GatewayKey:       defaultGatewayKey,
 		PoolEnabled:      false,
 		PoolInput:        strings.Join(defaultPoolSources, "\r\n"),
+		RaceEnabled:      true,
 	}
 }
 
@@ -148,6 +150,11 @@ func (s uiSettings) applyEnv() {
 		if urls := parsePoolSources(s.PoolInput); len(urls) > 0 {
 			setIfEmpty("PROXY_LIST_URLS", strings.Join(urls, ","))
 		}
+	}
+	if s.RaceEnabled {
+		setIfEmpty("PROXY_RACE", "1")
+	} else {
+		setIfEmpty("PROXY_RACE", "0")
 	}
 }
 

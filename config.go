@@ -38,6 +38,8 @@ type config struct {
 	probeTimeout     time.Duration
 	refreshInterval  time.Duration
 	streamIdle       time.Duration
+	raceEnabled      bool // 并行竞速：同一请求同时发往多个出口，最快返回者胜出
+	raceWidth        int  // 竞速中自动节点最多同时尝试几路（手动节点始终全上）
 }
 
 func loadConfig(project projectSpec) config {
@@ -77,6 +79,18 @@ func loadConfig(project projectSpec) config {
 		probeTimeout:     envMilliseconds("PROXY_PROBE_TIMEOUT", 8000),
 		refreshInterval:  envMilliseconds("PROXY_REFRESH_MS", 300000),
 		streamIdle:       300 * time.Second,
+		raceEnabled:      envIsOn(os.Getenv("PROXY_RACE")),
+		raceWidth:        nonNegative(envInt("PROXY_RACE_WIDTH", 8)),
+	}
+}
+
+// envIsOn 解析布尔环境变量：1/true/on/y 均视为开启。
+func envIsOn(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "on", "y", "yes":
+		return true
+	default:
+		return false
 	}
 }
 
