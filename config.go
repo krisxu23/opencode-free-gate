@@ -41,6 +41,7 @@ type config struct {
 	streamIdle       time.Duration
 	raceEnabled      bool // 并行竞速：同一请求同时发往多个出口，最快返回者胜出
 	raceWidth        int  // 竞速中自动节点最多同时尝试几路（手动节点始终全上）
+	hedgeDelay       time.Duration // 对冲竞速：首批无首字节后加发下一批的延迟
 }
 
 // upstreamTLSInsecure 由 INSECURE_TLS 控制：置 1 时上游连接跳过证书校验
@@ -96,6 +97,7 @@ func loadConfig(project projectSpec) config {
 		streamIdle:       envMilliseconds("STREAM_IDLE_TIMEOUT", 300000),
 		raceEnabled:      envIsOn(envString("PROXY_RACE", "1")),
 		raceWidth:        nonNegative(envInt("PROXY_RACE_WIDTH", 8)),
+		hedgeDelay:       envMilliseconds("PROXY_HEDGE_DELAY", 1500),
 	}
 }
 

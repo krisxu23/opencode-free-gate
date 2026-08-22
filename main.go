@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -386,9 +387,9 @@ func (g *sseGuard) Committed() bool {
 
 // writeCommittedStream 处理已提前提交 SSE 头的响应：赢家的流直接透传；
 // 其余情形（错误或非流式兜底）转为 SSE 错误事件，让客户端拿到明确原因。
-func writeCommittedStream(w http.ResponseWriter, r *http.Request, response *gatewayResponse, streamIdle time.Duration) {
+func writeCommittedStream(w http.ResponseWriter, r *http.Request, response *gatewayResponse, streamIdle time.Duration, observe func(truncated bool)) {
 	if response.live != nil {
-		streamResponse(w, r.Context(), response.live, streamIdle)
+		streamResponse(w, r.Context(), response.live, streamIdle, observe)
 		return
 	}
 	message := "上游请求失败"
@@ -498,6 +499,8 @@ func (a *app) finish(w http.ResponseWriter, r *http.Request, trace *requestTrace
 			response = jsonGatewayResponse(http.StatusGatewayTimeout, "请求超时")
 		case errors.Is(err, errNoProxy):
 			response = jsonGatewayResponse(http.StatusBadGateway, "没有可用代理")
+		case errors.Is(err, errStreamTruncated):
+			response = jsonGatewayResponse(http.StatusBadGateway, "上游流中断")
 		default:
 			response = jsonGatewayResponse(http.StatusBadGateway, "上游请求失败")
 		}
@@ -511,12 +514,24 @@ func (a *app) finish(w http.ResponseWriter, r *http.Request, trace *requestTrace
 		trace.finalProxy = "local"
 	}
 	a.logCompletion(r, trace)
+	// 流式响应结束后由 streamResponse 回报是否见到终止标记：
+	// 没见到即视为中途夭折，出口降权、镜像记账，下次绕开。
+	observe := func(truncated bool) {
+		if truncated {
+			log.Printf("[流截断] %s | 出口:%s | 上游:%s | 流未带终止标记即结束", r.URL.Path, trace.finalProxy, trace.upstream)
+			a.gateway.noteStreamTruncation(trace.finalProxy, trace.upstream)
+			return
+		}
+		if trackableExit(trace.finalProxy) {
+			a.gateway.exits.observeSuccess(trace.finalProxy)
+		}
+	}
 	if guard.Committed() {
 		// 响应头已提前提交，状态码无法再改变：赢家流透传，其余转为 SSE 错误事件。
-		writeCommittedStream(w, r, response, a.gateway.cfg.streamIdle)
+		writeCommittedStream(w, r, response, a.gateway.cfg.streamIdle, observe)
 		return
 	}
-	writeGatewayResponse(w, r, response, a.gateway.cfg.streamIdle)
+	writeGatewayResponse(w, r, response, a.gateway.cfg.streamIdle, observe)
 }
 
 func (a *app) logCompletion(r *http.Request, trace *requestTrace) {
@@ -537,7 +552,7 @@ func (a *app) logCompletion(r *http.Request, trace *requestTrace) {
 		result, r.Method, r.URL.Path, status, retries, len(trace.proxies), time.Since(trace.start).Milliseconds(), proxy)
 }
 
-func writeGatewayResponse(w http.ResponseWriter, r *http.Request, response *gatewayResponse, streamIdle time.Duration) {
+func writeGatewayResponse(w http.ResponseWriter, r *http.Request, response *gatewayResponse, streamIdle time.Duration, observe func(truncated bool)) {
 	for key, values := range response.header {
 		for _, value := range values {
 			w.Header().Add(key, value)
@@ -560,16 +575,53 @@ func writeGatewayResponse(w http.ResponseWriter, r *http.Request, response *gate
 		_, _ = w.Write(response.body)
 		return
 	}
-	streamResponse(w, r.Context(), response.live, streamIdle)
+	streamResponse(w, r.Context(), response.live, streamIdle, observe)
 }
 
-func streamResponse(w http.ResponseWriter, ctx context.Context, live *liveResponse, idle time.Duration) {
+// streamTerminals 是判定流完整结束的标记：见到任一个即认为上游正常收尾。
+// 涵盖三种路由：OpenAI chat（[DONE] / 非空 finish_reason）、Anthropic
+// （message_stop）、Codex responses（response.completed 等）。
+var streamTerminals = [][]byte{
+	[]byte("[DONE]"),
+	[]byte(`"finish_reason":"`), // null 写法是 "finish_reason":null，不含引号值
+	[]byte("message_stop"),
+	[]byte("response.completed"),
+	[]byte("response.failed"),
+	[]byte("response.incomplete"),
+}
+
+func streamResponse(w http.ResponseWriter, ctx context.Context, live *liveResponse, idle time.Duration, observe func(truncated bool)) {
 	defer live.Close()
 	flusher, _ := w.(http.Flusher)
 	if flusher != nil {
 		flusher.Flush()
 	}
 	buffer := make([]byte, 32<<10)
+	// 终止标记扫描：窗口保留上次尾部，防止标记被拆在两次读取里。
+	terminalSeen := false
+	var window []byte
+	scan := func(chunk []byte) {
+		if terminalSeen {
+			return
+		}
+		window = append(window, chunk...)
+		for _, marker := range streamTerminals {
+			if bytes.Contains(window, marker) {
+				terminalSeen = true
+				break
+			}
+		}
+		if len(window) > 64 {
+			window = append(window[:0], window[len(window)-64:]...)
+		}
+	}
+	// report 只在上游侧结束时调用；客户端主动断开（写失败/请求取消）
+	// 与上游质量无关，不记账。
+	report := func() {
+		if observe != nil {
+			observe(!terminalSeen)
+		}
+	}
 	// 复用单个计时器实现空闲超时：到点取消上游请求，阻塞中的 Read 随之返回。
 	timer := time.AfterFunc(idle, live.cancel)
 	defer timer.Stop()
@@ -578,6 +630,7 @@ func streamResponse(w http.ResponseWriter, ctx context.Context, live *liveRespon
 		n, err := live.response.Body.Read(buffer)
 		stopped := timer.Stop()
 		if n > 0 {
+			scan(buffer[:n])
 			if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
 				return
 			}
@@ -587,11 +640,15 @@ func streamResponse(w http.ResponseWriter, ctx context.Context, live *liveRespon
 		}
 		if !stopped {
 			log.Printf("[流] %s 内无数据，已关闭连接", idle)
+			report()
 			return
 		}
 		if err != nil {
 			if !errors.Is(err, io.EOF) && ctx.Err() == nil {
 				log.Printf("[流] upstream stream ended: %v", err)
+			}
+			if ctx.Err() == nil {
+				report()
 			}
 			return
 		}

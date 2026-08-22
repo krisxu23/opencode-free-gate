@@ -22,9 +22,10 @@ import (
 )
 
 var (
-	errAttemptTimeout = errors.New("代理首字节超时")
-	errRequestTimeout = errors.New("请求总超时")
-	errNoProxy        = errors.New("没有可用代理")
+	errAttemptTimeout   = errors.New("代理首字节超时")
+	errRequestTimeout   = errors.New("请求总超时")
+	errNoProxy          = errors.New("没有可用代理")
+	errStreamTruncated  = errors.New("上游流在首个数据块前中断")
 )
 
 const maxUpstreamBody = 64 << 20
@@ -93,10 +94,19 @@ type gateway struct {
 	advMu     sync.Mutex      // 保护下面三个字段与桥接的创建/重建
 	advSeen   map[string]struct{}
 	manualAdv []string // 手动高级链接（桥接重建时必须保留）
+
+	exits *exitTracker // 出口近期表现记账：评分排序 + 坐板凳
 }
 
 func newGateway(cfg config) *gateway {
-	return &gateway{cfg: cfg, poolFailed: make(map[string]time.Time), customFails: make(map[string]int), manualAddrs: make(map[string]struct{}), advSeen: make(map[string]struct{})}
+	return &gateway{
+		cfg:         cfg,
+		poolFailed:  make(map[string]time.Time),
+		customFails: make(map[string]int),
+		manualAddrs: make(map[string]struct{}),
+		advSeen:     make(map[string]struct{}),
+		exits:       newExitTracker(),
+	}
 }
 
 // markManual 登记手动节点：这类节点永不参与自动探活剔除。
@@ -482,13 +492,18 @@ func (g *gateway) probe(ctx context.Context, candidate slot) bool {
 		headers:  g.cfg.project.probeHeaders.Clone(),
 		deadline: deadline,
 	}
+	started := time.Now()
 	live, err := g.openUpstream(ctx, request, candidate.proxyURL, g.cfg.probeTimeout)
 	if err != nil {
+		g.exits.observeProbe(candidate.addr, 0, false)
 		return false
 	}
 	status := live.response.StatusCode
 	live.Close()
-	return status >= 200 && status < 400
+	ok := status >= 200 && status < 400
+	// 探活同时喂养出口评分：探活即预热连接，也为对冲排序提供延迟样本。
+	g.exits.observeProbe(candidate.addr, time.Since(started), ok)
+	return ok
 }
 
 func (g *gateway) takeCandidates(limit int) []proxyItem {
@@ -825,6 +840,15 @@ func (g *gateway) perform(ctx context.Context, request upstreamRequest, proxyURL
 	status := live.response.StatusCode
 	header := cloneEndToEndHeaders(live.response.Header)
 	if request.stream && status < 400 {
+		// 胜利者验证门：等到首个真实 SSE 数据行才把响应交给调用方。
+		// 200 + 空流（上游提前掐断的高发形态）在这里被拦下换下一出口，
+		// 客户端永远不会收到一条没有任何内容的流。
+		prefix, err := validateStreamHead(ctx, live, request.deadline)
+		if err != nil {
+			live.Close()
+			return nil, err
+		}
+		live.response.Body = &prefixedBody{prefix: prefix, src: live.response.Body}
 		return &gatewayResponse{status: status, header: header, live: live}, nil
 	}
 	body, err := live.readAll(request.deadline)
@@ -832,6 +856,68 @@ func (g *gateway) perform(ctx context.Context, request upstreamRequest, proxyURL
 		return nil, err
 	}
 	return &gatewayResponse{status: status, header: header, body: body}, nil
+}
+
+// streamHeadPrefixLimit 是验证门最多预读的字节数：读满仍无数据行则按
+// 非 SSE 形态放行，避免对非常规响应体误判。
+const streamHeadPrefixLimit = 16 << 10
+
+// prefixedBody 把验证阶段预读的首段数据接回流的开头，下游读取逻辑无感知。
+type prefixedBody struct {
+	prefix []byte
+	src    io.ReadCloser
+}
+
+func (b *prefixedBody) Read(p []byte) (int, error) {
+	if len(b.prefix) > 0 {
+		n := copy(p, b.prefix)
+		b.prefix = b.prefix[n:]
+		return n, nil
+	}
+	return b.src.Read(p)
+}
+
+func (b *prefixedBody) Close() error { return b.src.Close() }
+
+// validateStreamHead 持续读取直到出现第一个真实数据行（"data:"）。
+// 在此之前 EOF/读错误视为空流（errStreamTruncated）；请求取消按 ctx 错误
+// 返回（竞速输家被取消时不应记为截断）；请求截止按超时处理。
+func validateStreamHead(ctx context.Context, live *liveResponse, deadline time.Time) ([]byte, error) {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return nil, errRequestTimeout
+	}
+	timedOut := make(chan struct{})
+	timer := time.AfterFunc(remaining, func() {
+		close(timedOut)
+		live.cancel()
+	})
+	defer timer.Stop()
+
+	buf := make([]byte, 0, 4<<10)
+	chunk := make([]byte, 2<<10)
+	for {
+		n, err := live.response.Body.Read(chunk)
+		if n > 0 {
+			buf = append(buf, chunk[:n]...)
+			if bytes.Contains(buf, []byte("data:")) {
+				if timer.Stop() {
+					return buf, nil
+				}
+				<-timedOut
+				return nil, errRequestTimeout
+			}
+			if len(buf) >= streamHeadPrefixLimit {
+				return buf, nil
+			}
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, errStreamTruncated
+		}
+	}
 }
 
 // dispatch 在主上游与镜像之间轮询：任一上游给出非重试状态即返回，
@@ -1037,7 +1123,9 @@ func (g *gateway) dispatchCustomLayer(ctx context.Context, request upstreamReque
 	return nil, errNoProxy
 }
 
-// raceExits 组装竞速出口：手动节点全部参加，自动节点轮选补足宽度。
+// raceExits 组装对冲竞速的出口序列：手动节点全部保留、自动节点轮选补足
+// 宽度，剔除坐板凳节点（全部坐板凳时原样返回，保证仍有出口可用），再按
+// 近期表现排序（截断少 > 首字节快 > 未知样本居后）。排序即出发顺序。
 func (g *gateway) raceExits() []slot {
 	all := g.customSnapshot()
 	var manual, auto []slot
@@ -1060,13 +1148,20 @@ func (g *gateway) raceExits() []slot {
 			exits = append(exits, auto[(start+i)%len(auto)])
 		}
 	}
-	return exits
+	exits = g.exits.filterBenched(exits)
+	return g.exits.rank(exits)
 }
 
-// dispatchRace 并行竞速：同一请求同时发往多个出口（手动节点、在线池节点、直连），
-// 最先给出可用响应的通道胜出。每路出口使用独立 context，因此赢家出现后可以
-// 立刻取消仍在途的输家（释放上游连接与配额），而不会影响赢家已建立的流。
-// 客户端因此无需设置超长超时——等待由网关内部并行消化。
+// 对冲批次大小：首批少发保住指纹与配额，迟迟无人交付再加发。
+const (
+	hedgeFirstWave = 2 // 第一批出口数（直连另计）
+	hedgeBatch     = 3 // 每一加发批次的出口数
+)
+
+// dispatchRace 对冲竞速：出口按近期表现排序后分批出发——首批数量少，
+// hedgeDelay 内无人交付首个真实数据块就加发下一批，首个数据块即赢家
+// （perform 的验证门已保证赢家交过首数据块）。赢家出现后立即取消在途
+// 输家并停止加发；每路出口独立 context，取消输家不影响赢家的流。
 func (g *gateway) dispatchRace(ctx context.Context, request upstreamRequest, trace *requestTrace) (*gatewayResponse, error) {
 	exits := g.raceExits()
 
@@ -1075,23 +1170,28 @@ func (g *gateway) dispatchRace(ctx context.Context, request upstreamRequest, tra
 		isDirect bool
 		resp     *gatewayResponse
 		err      error
+		elapsed  time.Duration
 	}
-	results := make(chan raceResult, len(exits)+1)
+	results := make(chan raceResult, len(exits)+2)
 
-	// 每路出口独立 context + 取消注册表：赢家出现时只取消输家。
 	var inFlightMu sync.Mutex
 	inFlight := make(map[int]context.CancelFunc)
-	launch := func(id int, addr string, direct bool, proxyURL *url.URL) {
+	nextID := 0
+	launch := func(addr string, direct bool, proxyURL *url.URL) {
+		id := nextID
+		nextID++
 		attemptCtx, cancel := context.WithCancel(ctx)
 		inFlightMu.Lock()
 		inFlight[id] = cancel
 		inFlightMu.Unlock()
 		go func() {
+			started := time.Now()
 			resp, err := g.perform(attemptCtx, request, proxyURL)
+			elapsed := time.Since(started)
 			inFlightMu.Lock()
 			delete(inFlight, id)
 			inFlightMu.Unlock()
-			results <- raceResult{addr: addr, isDirect: direct, resp: resp, err: err}
+			results <- raceResult{addr: addr, isDirect: direct, resp: resp, err: err, elapsed: elapsed}
 			// 释放本路 context；仍在传输的流式响应除外（那由 live.Close 终结，
 			// 提前取消会掐断赢家/兜底的流）。
 			if resp == nil || resp.live == nil {
@@ -1107,69 +1207,122 @@ func (g *gateway) dispatchRace(ctx context.Context, request upstreamRequest, tra
 		inFlightMu.Unlock()
 	}
 
+	launchedExits := 0
+	directLaunched := false
+	launchWave := func(count int) {
+		for count > 0 && launchedExits < len(exits) {
+			candidate := exits[launchedExits]
+			trace.addAttempt(candidate.addr)
+			launch(candidate.addr, false, candidate.proxyURL)
+			launchedExits++
+			count--
+		}
+	}
+	launchedCount := func() int {
+		if directLaunched {
+			return launchedExits + 1
+		}
+		return launchedExits
+	}
+
+	var hedgeTimer *time.Timer
+	var hedgeCh <-chan time.Time
+	stopHedge := func() {
+		if hedgeTimer != nil {
+			hedgeTimer.Stop()
+			hedgeTimer = nil
+		}
+		hedgeCh = nil
+	}
+	armHedge := func() {
+		if launchedExits < len(exits) {
+			hedgeTimer = time.NewTimer(g.cfg.hedgeDelay)
+			hedgeCh = hedgeTimer.C
+			return
+		}
+		stopHedge()
+	}
+
 	const directAddr = "直连"
-	launched := 0
-	for i, s := range exits {
-		launched++
-		trace.addAttempt(s.addr)
-		launch(i, s.addr, false, s.proxyURL)
-	}
+	launchWave(hedgeFirstWave)
 	if g.cfg.project.directFallback {
-		launched++
 		trace.addAttempt(directAddr)
-		launch(len(exits), directAddr, true, nil)
+		launch(directAddr, true, nil)
+		directLaunched = true
 	}
-	log.Printf("[竞速] %d 路并行出发", launched)
+	armHedge()
+	log.Printf("[竞速] 对冲竞速：%d 个出口待发，首批 %d 路", len(exits), launchedCount())
 
 	var last *gatewayResponse
 	var lastAddr string
-	for received := 0; received < launched; received++ {
-		res := <-results
-		if res.err != nil {
-			if !res.isDirect {
-				g.noteCustomResult(res.addr, false)
-			}
-			if ctx.Err() != nil {
-				cancelInFlight()
-				return nil, res.err
-			}
-			continue
-		}
-		if retryableStatus(res.resp.status) {
-			// 限流/5xx 不算赢家；留第一个作为全军覆没时的兜底，重复的直接关闭。
-			if last == nil {
-				last = res.resp
-				lastAddr = res.addr
-			} else {
-				res.resp.live.Close()
-			}
-			continue
-		}
-		// 赢家出现：立即取消仍在途的输家；迟到的响应由收割协程关闭，防止泄漏。
-		cancelInFlight()
-		if last != nil {
-			last.live.Close()
-			last = nil
-		}
-		if !res.isDirect {
-			g.noteCustomResult(res.addr, true)
-		}
-		log.Printf("[竞速] 胜出: %s", res.addr)
-		trace.finalProxy = res.addr
-		go func() {
-			deadline := time.After(40 * time.Second) // 覆盖最长的首字节超时窗口
-			for {
-				select {
-				case extra := <-results:
-					if extra.resp != nil {
-						extra.resp.live.Close()
-					}
-				case <-deadline:
-					return
+	received := 0
+	for received < launchedCount() || hedgeCh != nil {
+		select {
+		case res := <-results:
+			received++
+			if res.err != nil {
+				if ctx.Err() != nil {
+					cancelInFlight()
+					stopHedge()
+					return nil, res.err
 				}
+				if !res.isDirect {
+					g.noteCustomResult(res.addr, false)
+					if errors.Is(res.err, errStreamTruncated) {
+						g.exits.observeTruncation(res.addr)
+						log.Printf("[流截断] %s 返回空流，换下一出口", res.addr)
+					} else {
+						g.exits.observeFail(res.addr)
+					}
+				}
+				continue
 			}
-		}()
-		return res.resp, nil
+			if retryableStatus(res.resp.status) {
+				// 限流/5xx 不算赢家；留第一个作为全军覆没时的兜底，重复的直接关闭。
+				if last == nil {
+					last = res.resp
+					lastAddr = res.addr
+				} else {
+					res.resp.live.Close()
+				}
+				continue
+			}
+			// 赢家出现（已通过首数据块验证）：取消在途输家，停止加发；
+			// 迟到的响应由收割协程关闭，防止泄漏。
+			cancelInFlight()
+			stopHedge()
+			if last != nil {
+				last.live.Close()
+				last = nil
+			}
+			if !res.isDirect {
+				g.noteCustomResult(res.addr, true)
+				g.exits.observeWin(res.addr, res.elapsed)
+			}
+			log.Printf("[竞速] 胜出: %s (%s)", res.addr, res.elapsed.Round(time.Millisecond))
+			trace.finalProxy = res.addr
+			go func() {
+				deadline := time.After(40 * time.Second) // 覆盖最长的首字节超时窗口
+				for {
+					select {
+					case extra := <-results:
+						if extra.resp != nil {
+							extra.resp.live.Close()
+						}
+					case <-deadline:
+						return
+					}
+				}
+			}()
+			return res.resp, nil
+		case <-hedgeCh:
+			launchWave(hedgeBatch)
+			armHedge()
+		case <-ctx.Done():
+			cancelInFlight()
+			stopHedge()
+			return nil, ctx.Err()
+		}
 	}
 	if last != nil {
 		log.Printf("[竞速] 无健康出口，使用可重试兜底响应: %s", lastAddr)
@@ -1177,6 +1330,16 @@ func (g *gateway) dispatchRace(ctx context.Context, request upstreamRequest, tra
 		return last, nil
 	}
 	return nil, errNoProxy
+}
+
+// noteStreamTruncation 记一次流中途夭折：出口记截断降权，所属镜像按失败记账。
+func (g *gateway) noteStreamTruncation(addr, upstream string) {
+	if trackableExit(addr) {
+		g.exits.observeTruncation(addr)
+	}
+	if upstream != "" {
+		g.noteUpstreamResult(upstream, false)
+	}
 }
 
 func (g *gateway) dispatchZen(ctx context.Context, request upstreamRequest, trace *requestTrace) (*gatewayResponse, error) {
