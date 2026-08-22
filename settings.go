@@ -102,9 +102,8 @@ func (s uiSettings) normalized() uiSettings {
 	if strings.TrimSpace(s.GatewayKey) == "" {
 		s.GatewayKey = defaultGatewayKey
 	}
-	if strings.TrimSpace(s.PoolInput) == "" {
-		s.PoolInput = strings.Join(defaultPoolSources, "\r\n")
-	}
+	// PoolInput 允许为空：默认源只在全新安装（defaultSettings）时预填，
+	// 用户清空保存后保持为空，不再自动回填。
 	if len(s.Proxies) == 0 && strings.TrimSpace(s.ProxyInput) != "" {
 		s.Proxies, _ = ParseProxyInput(s.ProxyInput)
 	}

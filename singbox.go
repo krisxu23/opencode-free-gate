@@ -116,6 +116,131 @@ func (b *advancedBridge) Close() {
 	}
 }
 
+// maxAdvancedNodes 是桥接里高级节点的总量上限（含手动与节点池来源）。
+const maxAdvancedNodes = 200
+
+// ensureAdvancedBridge 把链接集合（手动 + 节点池订阅）合并进内嵌 sing-box。
+// 集合有变化时重建实例：先成功启动新的，再原子替换旧的；失败则沿用旧桥接。
+// 重建会重排本地端口，因此同步迁移槽位：手动节点直接保留，池节点重新探活。
+func (g *gateway) ensureAdvancedBridge(ctx context.Context, freshLinks []string) {
+	g.advMu.Lock()
+	all := make([]string, 0, len(g.advSeen)+len(freshLinks))
+	seenSet := make(map[string]struct{}, len(g.advSeen)+len(freshLinks))
+	add := func(link string) {
+		if _, dup := seenSet[link]; dup {
+			return
+		}
+		seenSet[link] = struct{}{}
+		all = append(all, link)
+	}
+	for link := range g.advSeen {
+		add(link)
+	}
+	for _, link := range freshLinks {
+		add(link)
+	}
+	if g.advBridge != nil && len(all) == len(g.advSeen) {
+		g.advMu.Unlock()
+		return // 没有新增，无需重建
+	}
+	if len(all) > maxAdvancedNodes {
+		all = sampleStrings(all, maxAdvancedNodes)
+	}
+
+	items := make([]advancedItem, 0, len(all))
+	for _, link := range all {
+		node, err := parseAdvancedNode(link)
+		if err != nil {
+			continue // 订阅里的坏行直接跳过
+		}
+		items = append(items, advancedItem{link: link, node: *node})
+	}
+	if len(items) == 0 {
+		g.advMu.Unlock()
+		return // 没有可用的高级节点
+	}
+
+	newBridge, err := startAdvancedBridge(items)
+	if err != nil {
+		g.advMu.Unlock()
+		log.Printf("[高级] sing-box (重)建失败，沿用现有配置: %v", err)
+		return
+	}
+	old := g.advBridge
+	oldAddrs := make([]string, 0, len(old.Mapping))
+	for addr := range old.Mapping {
+		oldAddrs = append(oldAddrs, addr)
+	}
+	g.advBridge = newBridge
+	g.advSeen = seenSet
+
+	manualSet := make(map[string]struct{}, len(g.manualAdv))
+	for _, link := range g.manualAdv {
+		manualSet[link] = struct{}{}
+	}
+	var manualSlots []slot
+	var autoSlots []slot
+	for link, local := range newBridge.Links {
+		s, serr := slotFromRawURL("socks5://" + local)
+		if serr != nil {
+			continue
+		}
+		if _, isManual := manualSet[link]; isManual {
+			manualSlots = append(manualSlots, s)
+		} else {
+			autoSlots = append(autoSlots, s)
+		}
+	}
+	firstBuild := old == nil
+	g.advMu.Unlock()
+
+	// 迁移槽位：旧端口的槽位全部换绑到新端口。
+	for _, addr := range oldAddrs {
+		g.dropCustom(addr)
+		g.removeManual(addr)
+	}
+	for _, s := range manualSlots {
+		g.markManual(s.addr) // 手动节点无条件入池、永不自动移除
+		g.addSlot(s, true)
+	}
+	if firstBuild {
+		log.Printf("[高级] 内嵌 sing-box 已就绪：%d 个节点映射到本地端口 %d+（手动 %d）",
+			len(newBridge.Mapping), advancedBasePort, len(manualSlots))
+	} else {
+		log.Printf("[高级] 节点更新：%d 个高级节点在线（新增候选 %d）", len(newBridge.Mapping), len(freshLinks))
+	}
+
+	// 池来源节点走探活门禁，健康才入池。
+	if len(autoSlots) > 0 {
+		added := 0
+		for _, result := range probeSlots(ctx, g, autoSlots) {
+			if result.slot.addr == "" || !result.ok {
+				continue
+			}
+			if g.customCount() >= poolMaxAutoSlots {
+				break
+			}
+			if g.addSlot(result.slot, true) {
+				added++
+				log.Printf("[高级+] %s (%dms)", result.slot.addr, result.latency.Milliseconds())
+			}
+		}
+		log.Printf("[高级] 探活通过 %d/%d", added, len(autoSlots))
+	}
+}
+
+func sampleStrings(items []string, limit int) []string {
+	if len(items) <= limit {
+		return items
+	}
+	out := make([]string, 0, limit)
+	step := float64(len(items)) / float64(limit)
+	for i := 0; i < limit; i++ {
+		out = append(out, items[int(float64(i)*step)])
+	}
+	return out
+}
+
 // advancedOutboundJSON 按协议生成 sing-box 出站配置片段。
 func advancedOutboundJSON(tag string, n *advNode) (map[string]any, error) {
 	if n.server == "" || n.port == 0 {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -70,10 +71,35 @@ func TestParsePoolSources(t *testing.T) {
 func TestAppendPoolBodyJSON(t *testing.T) {
 	body := []byte(`[{"address":"1.2.3.4:8080","protocol":"socks5","latency":100,"quality_grade":"S","status":"active"}]`)
 	var out []slot
+	var advanced []string
 	seen := make(map[string]struct{})
-	n := appendPoolBody(&out, seen, body)
+	n := appendPoolBody(&out, &advanced, seen, body)
 	if n != 1 || len(out) != 1 || out[0].addr != "1.2.3.4:8080" {
 		t.Fatalf("JSON 解析结果不符: n=%d out=%v", n, out)
+	}
+}
+
+// base64 订阅（机场分享格式）：整包解码后应得到高级链接与普通节点。
+func TestAppendPoolBodyBase64Subscription(t *testing.T) {
+	text := strings.Join([]string{
+		"vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?security=tls&sni=a.com#HK",
+		"hysteria2://pass@1.2.3.4:36712?sni=b.com",
+		"socks5://5.6.7.8:1080",
+		"9.9.9.9:1080", // host:port 也应兼容
+	}, "\n")
+	body := []byte(base64.StdEncoding.EncodeToString([]byte(text)))
+	var out []slot
+	var advanced []string
+	seen := make(map[string]struct{})
+	n := appendPoolBody(&out, &advanced, seen, body)
+	if n != 4 {
+		t.Fatalf("订阅应解析出 4 条，实际 %d: out=%v adv=%v", n, out, advanced)
+	}
+	if len(out) != 2 || len(advanced) != 2 {
+		t.Fatalf("普通/高级分类不符: out=%d adv=%d", len(out), len(advanced))
+	}
+	if !strings.HasPrefix(advanced[0], "vless://") || !strings.HasPrefix(advanced[1], "hysteria2://") {
+		t.Fatalf("高级链接内容不符: %v", advanced)
 	}
 }
 

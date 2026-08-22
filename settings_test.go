@@ -161,6 +161,24 @@ func TestPickUpstreamRotatesAndSkipsCooldown(t *testing.T) {
 	}
 }
 
+// 用户清空节点源并保存后，重新加载不得回填默认值。
+func TestNormalizedKeepsEmptyPoolInput(t *testing.T) {
+	s := defaultSettings()
+	s.PoolInput = ""
+	got := s.normalized()
+	if strings.TrimSpace(got.PoolInput) != "" {
+		t.Fatalf("空的节点源不应被回填，实际 %q", got.PoolInput)
+	}
+}
+
+// 全新安装仍应预填默认源。
+func TestDefaultSettingsPrefillPoolInput(t *testing.T) {
+	s := defaultSettings()
+	if !strings.Contains(s.PoolInput, "proxy.amux.ai") {
+		t.Fatalf("默认源缺失: %q", s.PoolInput)
+	}
+}
+
 func TestApplyEnvRespectsExistingEnvironment(t *testing.T) {
 	t.Setenv("CUSTOM_PROXIES", "socks5://existing:1080")
 	t.Setenv("PORT", "")

@@ -90,10 +90,13 @@ type gateway struct {
 	manualAddrs map[string]struct{}
 
 	advBridge *advancedBridge // 内嵌 sing-box：高级协议 → 本地 socks 端口
+	advMu     sync.Mutex      // 保护下面三个字段与桥接的创建/重建
+	advSeen   map[string]struct{}
+	manualAdv []string // 手动高级链接（桥接重建时必须保留）
 }
 
 func newGateway(cfg config) *gateway {
-	return &gateway{cfg: cfg, poolFailed: make(map[string]time.Time), customFails: make(map[string]int), manualAddrs: make(map[string]struct{})}
+	return &gateway{cfg: cfg, poolFailed: make(map[string]time.Time), customFails: make(map[string]int), manualAddrs: make(map[string]struct{}), advSeen: make(map[string]struct{})}
 }
 
 // markManual 登记手动节点：这类节点永不参与自动探活剔除。
@@ -108,6 +111,12 @@ func (g *gateway) isManual(addr string) bool {
 	defer g.manualMu.RUnlock()
 	_, ok := g.manualAddrs[addr]
 	return ok
+}
+
+func (g *gateway) removeManual(addr string) {
+	g.manualMu.Lock()
+	delete(g.manualAddrs, addr)
+	g.manualMu.Unlock()
 }
 
 func (g *gateway) start(ctx context.Context) {
@@ -277,13 +286,21 @@ func (g *gateway) fillSlots(ctx context.Context) error {
 
 // Close 释放内嵌 sing-box 等后台资源（进程退出时系统也会回收）。
 func (g *gateway) Close() {
-	g.advBridge.Close()
+	g.advMu.Lock()
+	bridge := g.advBridge
+	g.advMu.Unlock()
+	bridge.Close()
 }
 
 func (g *gateway) initCustomSlots(ctx context.Context) error {
 	// 高级协议链接（vless/vmess/trojan/ss/hysteria2/tuic）先交给内嵌
 	// sing-box 转成本地 socks5 端点，再与普通节点一起走原有流程。
-	g.advBridge = g.startAdvancedBridgeFrom(g.cfg.customProxies)
+	// 手动高级节点与节点池高级节点统一由 ensureAdvancedBridge 管理。
+	manualLinks := collectAdvancedLinks(g.cfg.customProxies)
+	g.advMu.Lock()
+	g.manualAdv = manualLinks
+	g.advMu.Unlock()
+	g.ensureAdvancedBridge(ctx, manualLinks)
 	parsed := g.parseCustomProxies(g.cfg.customProxies)
 	if len(parsed) == 0 {
 		return nil
@@ -331,10 +348,10 @@ func (g *gateway) initCustomSlots(ctx context.Context) error {
 	return nil
 }
 
-// startAdvancedBridgeFrom 从配置文本里收集高级协议链接并启动 sing-box 桥接。
-func (g *gateway) startAdvancedBridgeFrom(raw string) *advancedBridge {
+// collectAdvancedLinks 从配置文本里提取高级协议链接（手动节点来源）。
+func collectAdvancedLinks(raw string) []string {
 	parts := strings.Split(raw, ",")
-	var items []advancedItem
+	var links []string
 	seen := make(map[string]struct{})
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
@@ -345,8 +362,7 @@ func (g *gateway) startAdvancedBridgeFrom(raw string) *advancedBridge {
 		if schemeEnd <= 0 {
 			continue
 		}
-		kind, ok := isAdvancedScheme(part[:schemeEnd])
-		if !ok {
+		if _, ok := isAdvancedScheme(part[:schemeEnd]); !ok {
 			continue
 		}
 		if _, dup := seen[part]; dup {
@@ -354,22 +370,13 @@ func (g *gateway) startAdvancedBridgeFrom(raw string) *advancedBridge {
 		}
 		node, err := parseAdvancedNode(part)
 		if err != nil {
-			log.Printf("[高级] 忽略 %s 链接: %v", strings.ToUpper(kind), err)
+			log.Printf("[高级] 忽略 %s 链接: %v", strings.ToUpper(strings.SplitN(part, ":", 2)[0]), err)
 			continue
 		}
 		seen[part] = struct{}{}
-		items = append(items, advancedItem{link: part, node: *node})
+		links = append(links, part)
 	}
-	if len(items) == 0 {
-		return nil
-	}
-	bridge, err := startAdvancedBridge(items)
-	if err != nil {
-		log.Printf("[高级] 内嵌 sing-box 启动失败，高级节点本次不可用: %v", err)
-		return nil
-	}
-	log.Printf("[高级] 内嵌 sing-box 已就绪：%d 个节点映射到本地端口 %d+", len(items), advancedBasePort)
-	return bridge
+	return links
 }
 
 func (g *gateway) parseCustomProxies(raw string) []slot {
@@ -382,11 +389,14 @@ func (g *gateway) parseCustomProxies(raw string) []slot {
 		}
 		if schemeEnd := strings.Index(part, "://"); schemeEnd > 0 {
 			if _, adv := isAdvancedScheme(part[:schemeEnd]); adv {
-				if g.advBridge == nil {
+				g.advMu.Lock()
+				bridge := g.advBridge
+				g.advMu.Unlock()
+				if bridge == nil {
 					log.Printf("[配置] 高级节点暂不可用: %s", redactProxy(part))
 					continue
 				}
-				local, ok := g.advBridge.Links[part]
+				local, ok := bridge.Links[part]
 				if !ok {
 					log.Printf("[配置] 高级节点暂不可用: %s", redactProxy(part))
 					continue

@@ -168,7 +168,22 @@ func (g *gateway) refreshPool(ctx context.Context) {
 		existing[addr] = struct{}{}
 	}
 
-	candidates := g.fetchPoolSources(ctx, urls)
+	candidates, advLinks := g.fetchPoolSources(ctx, urls)
+
+	// 订阅/源里出现新的高级协议链接时，合并进内嵌 sing-box（重建实例）。
+	var freshAdv []string
+	for _, link := range advLinks {
+		g.advMu.Lock()
+		_, known := g.advSeen[link]
+		g.advMu.Unlock()
+		if !known {
+			freshAdv = append(freshAdv, link)
+		}
+	}
+	if len(freshAdv) > 0 {
+		g.ensureAdvancedBridge(ctx, freshAdv)
+	}
+
 	var fresh []slot
 	for _, s := range candidates {
 		if _, dup := existing[s.addr]; dup {
@@ -231,13 +246,15 @@ func (g *gateway) refreshPool(ctx context.Context) {
 		len(urls), len(candidates), added, dead, g.customCount())
 }
 
-// fetchPoolSources 逐个拉取节点源，自动识别 JSON（amux 风格）与纯文本列表。
-func (g *gateway) fetchPoolSources(ctx context.Context, urls []string) []slot {
+// fetchPoolSources 逐个拉取节点源，自动识别 JSON（amux 风格）、纯文本列表与
+// base64 订阅（机场订阅）。返回普通代理槽位与高级协议链接两个列表。
+func (g *gateway) fetchPoolSources(ctx context.Context, urls []string) ([]slot, []string) {
 	client := &http.Client{Transport: controlTransport(poolFetchTimeout)}
 	defer client.CloseIdleConnections()
 
 	seen := make(map[string]struct{})
 	var out []slot
+	var advanced []string
 	for _, raw := range urls {
 		if ctx.Err() != nil {
 			break
@@ -267,15 +284,30 @@ func (g *gateway) fetchPoolSources(ctx context.Context, urls []string) []slot {
 			log.Printf("[池] 拉取失败 %s: status=%d", shortSource(source), status)
 			continue
 		}
-		count := appendPoolBody(&out, seen, body)
+		count := appendPoolBody(&out, &advanced, seen, body)
 		log.Printf("[池] %s -> %d 条", shortSource(source), count)
 	}
-	return out
+	return out, advanced
 }
 
 // appendPoolBody 解析单个源的响应体，返回解析出的条数。
-func appendPoolBody(out *[]slot, seen map[string]struct{}, body []byte) int {
+// 支持三种形态：JSON 数组、纯文本列表、base64 订阅（机场分享的整包 base64，
+// 解码后是 vless/vmess/ss/hysteria2/trojan 等分享链接列表）。
+func appendPoolBody(out *[]slot, advanced *[]string, seen map[string]struct{}, body []byte) int {
 	trimmed := strings.TrimSpace(string(body))
+	count := parsePoolText(out, advanced, seen, trimmed)
+	if count == 0 {
+		// 尝试按 base64 订阅解码（容忍换行/空白）。
+		compact := strings.Join(strings.Fields(trimmed), "")
+		if decoded, err := decodeBase64Any(compact); err == nil && strings.Contains(decoded, "://") {
+			count = parsePoolText(out, advanced, seen, decoded)
+		}
+	}
+	return count
+}
+
+// parsePoolText 逐行解析明文内容；高级协议链接单独收集，不当作 host:port。
+func parsePoolText(out *[]slot, advanced *[]string, seen map[string]struct{}, text string) int {
 	count := 0
 	appendSlot := func(s slot, ok bool) {
 		if !ok || s.addr == "" {
@@ -289,9 +321,9 @@ func appendPoolBody(out *[]slot, seen map[string]struct{}, body []byte) int {
 		count++
 	}
 
-	if strings.HasPrefix(trimmed, "[") {
+	if strings.HasPrefix(strings.TrimSpace(text), "[") {
 		var items []proxyItem
-		if err := json.Unmarshal([]byte(trimmed), &items); err == nil {
+		if err := json.Unmarshal([]byte(text), &items); err == nil {
 			for _, item := range items {
 				s, slotErr := slotFromProxy(item.Address, item.Protocol)
 				appendSlot(s, slotErr == nil)
@@ -299,11 +331,47 @@ func appendPoolBody(out *[]slot, seen map[string]struct{}, body []byte) int {
 			return count
 		}
 	}
-	for _, line := range strings.Split(trimmed, "\n") {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
+			continue
+		}
+		// 高级协议链接（vless/vmess/trojan/ss/hysteria2/hy2/tuic）：
+		// 校验可解析后原链接收集，#名称保留用于展示。
+		if schemeEnd := strings.Index(line, "://"); schemeEnd > 0 {
+			if _, isAdv := isAdvancedScheme(line[:schemeEnd]); isAdv {
+				if _, err := parseAdvancedNode(line); err == nil {
+					count += len(appendAdvanced(advanced, seen, line)...)
+				}
+				continue
+			}
+		}
 		s, ok := parsePoolLine(line)
 		appendSlot(s, ok)
 	}
 	return count
+}
+
+// appendAdvanced 去重后收集高级链接，返回收集到的切片便于计数。
+func appendAdvanced(advanced *[]string, seen map[string]struct{}, links ...string) []string {
+	if advanced == nil {
+		return nil
+	}
+	var added []string
+	for _, link := range links {
+		link = strings.TrimSpace(link)
+		if link == "" {
+			continue
+		}
+		key := "adv:" + link
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		added = append(added, link)
+	}
+	*advanced = append(*advanced, added...)
+	return added
 }
 
 // recentlyFailed 报告节点是否在最近一轮失败冷却期内。

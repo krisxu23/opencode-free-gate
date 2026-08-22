@@ -166,7 +166,7 @@ func runGatewayUI(handler *app, settings uiSettings, path string, shutdown func(
 											dcl.Label{Text: "秒"},
 										},
 									},
-									dcl.Label{Text: "代理节点（一行一个，支持 http/https/socks5 及 socks:// 分享链接；手动节点不会被自动程序删除）:"},
+									dcl.Label{Text: "代理节点（一行一个；支持 socks5/http、vless://、vmess://、trojan://、ss://、hysteria2://(hy2)、tuic:// 分享链接；手动节点不会被自动删除）:"},
 									dcl.TextEdit{
 										AssignTo: &ui.proxyEdit,
 										Text:     settings.ProxyInput,
@@ -206,7 +206,7 @@ func runGatewayUI(handler *app, settings uiSettings, path string, shutdown func(
 										Text:     "自动拉取在线节点并探活（每轮用真实 opencode.ai 请求测活，健康节点实时入池、失效自动移除，无需重启）",
 										Checked:  settings.PoolEnabled,
 									},
-									dcl.Label{Text: "节点源链接（一行一个；支持 socks5 文本列表与 amux JSON，github 页面链接自动转 raw）:"},
+									dcl.Label{Text: "节点源链接（一行一个；支持 socks5/http 文本列表、amux JSON、base64 订阅链接（机场订阅，自动解码出 vless/vmess/hy2 等节点）、明文分享链接；github 页面链接自动转 raw）:"},
 									dcl.TextEdit{
 										AssignTo: &ui.poolEdit,
 										Text:     settings.PoolInput,
