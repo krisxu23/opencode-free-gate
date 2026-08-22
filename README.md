@@ -1,32 +1,34 @@
 # opencode-free-gate
 
-Go 实现的 **OpenCode 免费模型本地网关**。把 opencode.ai 的免费模型包装成 OpenAI 兼容接口，提供 Windows 图形界面、多镜像自动轮转和可选的代理出口。
+Go 实现的 **OpenCode 免费模型本地网关**：把 opencode.ai 免费模型包装成 OpenAI / Anthropic / Codex 兼容接口，Windows 单文件运行，支持多镜像轮转与多协议代理出口。
 
 ```
 opencode 客户端
-    ↓  http://localhost:13339/openai/v1（OpenAI 兼容）
+    ↓  http://localhost:13339/openai/v1
 opencode-free-gate.exe
-    ↓  多镜像轮转 + 可选代理出口
+    ↓  多镜像轮转 ＋ 并行竞速 ＋ 可选代理出口
 opencode.ai/zen ＋ 3 个公共 CDN 镜像
 ```
 
-## 特性
+## 功能
 
-- **图形界面**：双击即用，无黑窗口；OpenCode 官方图标（文件 / 任务栏 / 标题栏全场景）。
-- **实时日志**：倒序显示（最新在最上面），环形缓冲 + 显示层双重上限，长期运行内存占用恒定（约 230KB）。
-- **多镜像轮转**：官方上游 + 3 个 CM CDN 镜像按请求轮换；连续失败 2 次的镜像自动冷却 3 分钟。
-- **并行竞速**（默认开启）：对话请求同时发往手动节点 + 在线池节点 + 直连共多路出口，最快返回者胜出、其余立即取消。客户端无需设置超长超时，等待由网关内部并行消化；自动节点路数受 `PROXY_RACE_WIDTH`（默认 8）限制，避免向上游打过多重复请求。
-- **高级协议节点**：内置 sing-box（v1.13），代理列表直接粘贴 `vless://`、`vmess://`、`trojan://`、`ss://`、`hysteria2://`(hy2) 、`tuic://` 分享链接即可；程序自动把它们转换为本地回环 SOCKS5 端点（127.0.0.1:21000+，仅内部使用，不碰系统代理设置），之后与普通节点一样参与探活与并行竞速。
-- **在线节点池**：填入节点源链接并打开开关，后台每轮自动拉取 → 用真实 opencode.ai 请求探活 → 健康节点实时入池、失效自动移除，全程无需重启。源支持 socks5/http 文本列表、amux JSON、**base64 机场订阅链接**（自动解码出 vless/vmess/hy2 等节点并入 sing-box）以及明文分享链接。手动添加的代理节点独立管理：无条件入池、永不自动移除（失效时由请求轮换自动跳过）。
-- **模型列表**：启动时自动拉取一次免费模型并长期缓存（失败会在后续请求时自动重试），界面一键复制完整模型 ID（含 `-free` 后缀）；请求里的短名（如 `mimo-v2.5`）自动重定向到对应 `-free` 模型。
-- **出站模式**：仅直连 / 自定义代理 二选一；支持 HTTP、HTTPS、SOCKS5 URL 及 `socks://` 分享链接自动转换。
-- **配置持久化**：所有设置保存在 exe 同目录的 `config.json`，「保存并重启」立即生效；环境变量优先级高于配置文件。
-- **固定 API Key**：`sk-local-freegate`（网关不校验 Key，仅供客户端占位）。
+| 功能 | 说明 |
+|---|---|
+| **协议兼容** | OpenAI / Anthropic / Codex 三种路由，客户端零改造接入 |
+| **并行竞速** | 每次请求同时发往多个出口（手动节点＋池节点＋直连），最快返回者胜出 |
+| **高级节点** | 内嵌 sing-box v1.13：`vless` `vmess` `trojan` `ss` `hysteria2(hy2)` `tuic` 分享链接直接粘贴，自动转为内部 SOCKS5 端点参与探活和竞速 |
+| **在线节点池** | 定时拉取节点源 → 真实请求探活 → 健康入池 / 失效自删；支持文本列表、JSON、**base64 订阅链接** |
+| **手动节点保护** | 手动填写的节点无条件保留、永不自动移除 |
+| **多镜像轮转** | 上游按请求轮换；连续失败的镜像自动冷却 3 分钟 |
+| **模型缓存** | 启动时拉取一次免费模型并长期使用；短名（如 `mimo-v2.5`）自动重定向到 `-free` 模型 |
+| **图形界面** | 双击即用；状态 / 设置 / 日志三页，配置存 exe 同目录 `config.json` |
+
+程序不内置任何节点或订阅；不收集任何数据。
 
 ## 快速开始
 
-1. 从 [Releases](https://github.com/krisxu23/opencode-free-gate/releases/tag/exe-latest) 下载 `opencode-free-gate-gui.exe`，放到任意目录双击运行。
-2. 编辑 opencode 配置文件（`~/.config/opencode/opencode.jsonc`），添加本地 provider：
+1. 从 [Releases](https://github.com/krisxu23/opencode-free-gate/releases/tag/exe-latest) 下载 `opencode-free-gate-gui.exe`，任意目录双击运行。
+2. 编辑 opencode 配置文件（`~/.config/opencode/opencode.jsonc`），添加 provider：
 
 ```jsonc
 {
@@ -34,7 +36,6 @@ opencode.ai/zen ＋ 3 个公共 CDN 镜像
   "provider": {
     "freegate": {
       "npm": "@ai-sdk/openai-compatible",
-      "name": "FreeGate（本地免费网关）",
       "options": {
         "baseURL": "http://localhost:13339/openai/v1",
         "apiKey": "sk-local-freegate"
@@ -48,11 +49,27 @@ opencode.ai/zen ＋ 3 个公共 CDN 镜像
 }
 ```
 
-3. 在 opencode 里切换到 FreeGate 的任意模型发消息即可。可用模型以网关界面的「免费模型」区为准。
+3. 在 opencode 里切换到 FreeGate 模型即可。完整模型列表以网关界面为准。
 
-## 推荐的公共节点源（可选）
+## API 路由
 
-程序不再内置任何节点池源。想体验「在线节点池」的话，可以把下面的公共免费代理列表填入 设置 → 节点源链接（一行一个），仅作推荐、随时可换可删：
+| 协议 | 路由 |
+|---|---|
+| OpenAI | `/openai/v1/models` · `/openai/v1/chat/completions` |
+| Anthropic | `/anthropic/v1/messages` |
+| Codex | `/codex/v1/responses` |
+| 健康检查 | `/healthz` |
+
+## 节点来源
+
+| 来源 | 用法 |
+|---|---|
+| 手动节点 | 设置 → 代理节点框粘贴，一行一个；支持 socks5/http URL 与各协议分享链接 |
+| 订阅 / 节点源 | 打开「在线节点池」开关并填源链接；支持 base64 订阅、socks5 文本列表、amux JSON、明文分享链接 |
+| mihomo 本地 | 填 `socks5://127.0.0.1:7890` 即可复用本机 Clash 的全部节点 |
+
+<details>
+<summary>推荐的公共免费代理源（可选，可用率低，仅作备胎）</summary>
 
 ```
 https://proxy.amux.ai/api/proxies
@@ -63,29 +80,10 @@ https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt
 https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5.txt
 https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt
 ```
+</details>
 
-> 这些是公共免费代理聚合列表，可用率通常很低（<1%），仅适合配合并行竞速当备胎；有自己的订阅链接或节点请优先用它们。
-
-## API 路由
-
-| 客户端类型 | 路由 |
-|---|---|
-| OpenAI | `/openai/v1/models`、`/openai/v1/chat/completions` |
-| Anthropic | `/anthropic/v1/messages` |
-| Codex | `/codex/v1/responses` |
-| 健康检查 | `/healthz` |
-
-## 界面说明
-
-界面为三个标签页：
-
-- **运行状态**：监听端口、出站模式、代理在线数、API 地址与默认 Key 一键复制；免费模型列表；实时在线节点明细（手动节点带标注）
-- **设置**：出站模式与超时；代理列表编辑；上游镜像；在线节点池开关与源链接
-- **实时日志**：完整运行日志，最新在最上面
-
-## 配合 mihomo 使用（可选）
-
-让网关流量经过 mihomo（Clash Meta）节点池，获得更高质量的出口：
+<details>
+<summary>配合 mihomo 按进程分流（可选）</summary>
 
 ```yaml
 # proxy-groups 追加
@@ -99,57 +97,37 @@ https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt
   exclude-type: 'DIRECT'
   url: 'https://g.cn/generate_204'
   interval: 600
-  lazy: true
 
 # rules 顶部追加
 - PROCESS-NAME,opencode-free-gate.exe,OpenCode网关
-- DOMAIN-SUFFIX,opencode.ai,OpenCode网关
 ```
 
-然后在网关界面「出站设置」填入 `socks5://127.0.0.1:7890`（mihomo 默认混合端口），切到「走代理」保存重启。日志出现 `[自定义]` 即生效。
+网关里填 `socks5://127.0.0.1:7890`，切到「走代理」保存重启。
+</details>
 
 ## 配置
 
-### config.json（exe 同目录，界面自动维护）
+设置在界面修改后「保存并重启」生效，持久化到 exe 同目录 `config.json`。环境变量优先级更高：
 
-| 字段 | 默认值 | 说明 |
+| 环境变量 | 默认 | 说明 |
 |---|---|---|
-| `port` | `13339` | HTTP 监听端口 |
-| `outbound` | `direct` | `direct` 仅直连 / `proxy` 走自定义代理 |
-| `proxies` | 空 | 代理 URL 列表 |
-| `mirrors` | 官方 + 3 CM 镜像 | 上游镜像基址列表 |
-| `first_byte_seconds` | `30` | 流式首字节超时（秒） |
-| `budget_seconds` | `180` | 流式总预算（秒） |
-
-### 环境变量（优先级高于 config.json）
-
-| 变量 | 默认值 | 说明 |
-|---|---:|---|
 | `PORT` | `13339` | 监听端口 |
-| `CUSTOM_PROXIES` | 空 | 逗号分隔的代理 URL |
-| `MIRROR_URLS` | 空 | 逗号分隔的镜像基址 |
-| `PROXY_LIST_URLS` | 空 | 逗号分隔的节点源链接（GUI 开关开启时自动设置） |
-| `PROXY_RACE` | 1 | 并行竞速开关（1/0） |
-| `PROXY_RACE_WIDTH` | 8 | 竞速中自动节点的最大并行路数（手动节点不受限） |
+| `CUSTOM_PROXIES` | 空 | 逗号分隔的代理 URL / 分享链接 |
+| `MIRROR_URLS` | 空 | 上游镜像基址 |
+| `PROXY_LIST_URLS` | 空 | 节点池源链接 |
+| `PROXY_RACE` / `PROXY_RACE_WIDTH` | `1` / `8` | 竞速开关 / 自动节点最大并发路数 |
 | `PROXY_FIRST_BYTE_TIMEOUT` | `30000` | 流式首字节超时（毫秒） |
-| `HARD_TIMEOUT` | `10000` | 流式总预算（毫秒） |
-| `PROXY_ORDER` | 空 | 回退顺序（`public`/`zen`/`custom`），GUI 模式自动设为 `custom` |
+| `HARD_TIMEOUT` | `180000` | 流式总预算（毫秒） |
+| `PROXY_ORDER` | 空 | 回退顺序；GUI 自动设为 `custom` 或 `direct` |
 
-> 环境变量仅在显式设置时生效；GUI 的「保存并重启」不会覆盖已存在的环境变量。
+> 「保存并重启」会剔除以上变量后重启进程，以 config.json 为准；仅显式设置的变量优先。
 
 ## 构建
 
-推送代码后 GitHub Actions 自动构建并发布两个版本到 [exe-latest](https://github.com/krisxu23/opencode-free-gate/releases/tag/exe-latest)：
-
-- `opencode-free-gate-gui.exe`：图形界面版（嵌入图标与清单）
-- `opencode-free-gate-console.exe`：控制台版（日志输出到 stdout，排障用）
-
-本地构建需要 Go 1.24+：
+推送后 GitHub Actions 自动构建并发布到 [exe-latest](https://github.com/krisxu23/opencode-free-gate/releases/tag/exe-latest)：`-gui.exe`（图形版）/ `-console.exe`（排障版）。本地构建需 Go 1.24+：
 
 ```bash
 go test ./...
-go run github.com/tc-hib/go-winres@latest simply --icon app.ico --manifest gui --arch amd64   # 仅 GUI 版需要
-go build -trimpath -ldflags "-s -w -H windowsgui -X main.uiMode=gui" -o opencode-free-gate-gui.exe .
-rm *.syso
-go build -trimpath -ldflags "-s -w -X main.uiMode=console" -o opencode-free-gate-console.exe .
+go build -trimpath -ldflags "-s -w -H windowsgui" -o opencode-free-gate-gui.exe .   # GUI 版先用 go-winres 嵌图标
+go build -trimpath -ldflags "-s -w" -o opencode-free-gate-console.exe .
 ```
