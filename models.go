@@ -16,15 +16,22 @@ import (
 const modelCacheTTL = 60 * time.Second
 
 type cachedModels struct {
-	rename   map[string]string
-	redirect map[string]string
-	loadedAt time.Time
+	rename    map[string]string
+	redirect  map[string]string
+	loadedAt  time.Time
+	committed bool // true=已从上游成功拉取过；成功后永久使用缓存，不再自动刷新
 }
 
 func (g *gateway) modelMaps(ctx context.Context) (map[string]string, map[string]string) {
 	g.modelMu.Lock()
 	defer g.modelMu.Unlock()
 
+	// 上游免费模型列表基本不变：成功拉取一次后长期使用，不再周期性刷新。
+	if g.modelCache != nil && g.modelCache.committed {
+		return cloneStringMap(g.modelCache.rename), cloneStringMap(g.modelCache.redirect)
+	}
+	// 尚未成功过（含启动时网络故障）：短暂负缓存后允许重试，
+	// 直到拿到第一次成功结果为止。
 	if g.modelCache != nil && time.Since(g.modelCache.loadedAt) < modelCacheTTL {
 		return cloneStringMap(g.modelCache.rename), cloneStringMap(g.modelCache.redirect)
 	}
@@ -32,7 +39,7 @@ func (g *gateway) modelMaps(ctx context.Context) (map[string]string, map[string]
 	rename, err := g.fetchModelMaps(ctx)
 	if err != nil {
 		if g.modelCache != nil {
-			log.Printf("[模型] 刷新失败，使用缓存: %v", err)
+			log.Printf("[模型] 刷新失败，继续用现有列表: %v", err)
 			g.modelCache.loadedAt = time.Now().Add(-(modelCacheTTL - 5*time.Second))
 			return cloneStringMap(g.modelCache.rename), cloneStringMap(g.modelCache.redirect)
 		}
@@ -49,8 +56,8 @@ func (g *gateway) modelMaps(ctx context.Context) (map[string]string, map[string]
 	}
 
 	redirect := buildRedirect(rename)
-	g.modelCache = &cachedModels{rename: rename, redirect: redirect, loadedAt: time.Now()}
-	log.Printf("[模型] 已刷新 %d 个免费模型", len(rename))
+	g.modelCache = &cachedModels{rename: rename, redirect: redirect, loadedAt: time.Now(), committed: true}
+	log.Printf("[模型] 已刷新 %d 个免费模型（本次运行长期使用）", len(rename))
 	return cloneStringMap(rename), cloneStringMap(redirect)
 }
 
