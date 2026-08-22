@@ -478,6 +478,9 @@ func restartEnv() []string {
 		"MIRROR_URLS":              {},
 		"PROXY_FIRST_BYTE_TIMEOUT": {},
 		"HARD_TIMEOUT":             {},
+		"PROXY_LIST_URLS":          {}, // 节点池源链接
+		"PROXY_RACE":               {}, // 并行竞速开关
+		"PROXY_RACE_WIDTH":         {}, // 竞速并发宽度
 	}
 	env := os.Environ()
 	kept := make([]string, 0, len(env))
