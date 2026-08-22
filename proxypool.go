@@ -204,11 +204,14 @@ func (g *gateway) refreshPool(ctx context.Context) {
 	}
 
 	// 复检现有节点，剔除已失效的，保持池子新鲜。
-	// 本轮刚入池的节点跳过复检——几秒前才探活通过，没必要立刻再测一遍。
+	// 本轮刚入池的跳过（几秒前刚探活通过）；手动节点永不自动移除。
 	current := g.customSnapshot()
 	var recheck []slot
 	for _, s := range current {
 		if _, skip := justAdded[s.addr]; skip {
+			continue
+		}
+		if g.isManual(s.addr) {
 			continue
 		}
 		recheck = append(recheck, s)
@@ -347,11 +350,15 @@ func (g *gateway) dropCustom(address string) bool {
 
 // noteCustomResult 记录节点在真实请求中的表现；连续 3 次失败自动移出池子，
 // 避免死节点反复浪费重试预算。成功即清零。
+// 手动节点不参与自动淘汰——失效时由请求轮换机制自然跳过。
 func (g *gateway) noteCustomResult(address string, ok bool) {
 	g.customFailsMu.Lock()
 	defer g.customFailsMu.Unlock()
 	if ok {
 		delete(g.customFails, address)
+		return
+	}
+	if g.isManual(address) {
 		return
 	}
 	g.customFails[address]++

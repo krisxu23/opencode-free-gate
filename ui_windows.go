@@ -253,12 +253,20 @@ func (ui *gatewayUI) refreshPoolLive() {
 	if ui.poolLive == nil {
 		return
 	}
-	addrs := ui.app.gateway.slotAddresses(true)
+	slots := ui.app.gateway.customSnapshot()
 	var text string
-	if len(addrs) == 0 {
+	if len(slots) == 0 {
 		text = "（暂无在线节点，等待探活…）"
 	} else {
-		text = fmt.Sprintf("共 %d 个：\r\n%s", len(addrs), strings.Join(addrs, "\r\n"))
+		lines := make([]string, 0, len(slots))
+		for _, s := range slots {
+			if ui.app.gateway.isManual(s.addr) {
+				lines = append(lines, s.addr+"　（手动，不自动移除）")
+			} else {
+				lines = append(lines, s.addr)
+			}
+		}
+		text = fmt.Sprintf("共 %d 个：\r\n%s", len(slots), strings.Join(lines, "\r\n"))
 	}
 	if text == ui.poolLiveText {
 		return

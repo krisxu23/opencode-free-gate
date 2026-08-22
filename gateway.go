@@ -85,10 +85,27 @@ type gateway struct {
 
 	customFailsMu sync.Mutex
 	customFails   map[string]int
+
+	manualMu    sync.RWMutex
+	manualAddrs map[string]struct{}
 }
 
 func newGateway(cfg config) *gateway {
-	return &gateway{cfg: cfg, poolFailed: make(map[string]time.Time), customFails: make(map[string]int)}
+	return &gateway{cfg: cfg, poolFailed: make(map[string]time.Time), customFails: make(map[string]int), manualAddrs: make(map[string]struct{})}
+}
+
+// markManual 登记手动节点：这类节点永不参与自动探活剔除。
+func (g *gateway) markManual(addr string) {
+	g.manualMu.Lock()
+	g.manualAddrs[addr] = struct{}{}
+	g.manualMu.Unlock()
+}
+
+func (g *gateway) isManual(addr string) bool {
+	g.manualMu.RLock()
+	defer g.manualMu.RUnlock()
+	_, ok := g.manualAddrs[addr]
+	return ok
 }
 
 func (g *gateway) start(ctx context.Context) {
@@ -286,9 +303,18 @@ func (g *gateway) initCustomSlots(ctx context.Context) error {
 
 	ready := 0
 	for result := range results {
-		if result.ok && g.addSlot(result.slot, true) {
+		// 手动节点无论探活结果一律入池、永不自动移除；
+		// 失效时的表现就是请求失败并轮换到下一个节点。
+		g.markManual(result.slot.addr)
+		if g.addSlot(result.slot, true) {
+			if result.ok {
+				ready++
+				log.Printf("[手动+] %s (%dms)", result.slot.addr, result.latency.Milliseconds())
+			} else {
+				log.Printf("[手动] %s 探活未通过，仍按配置保留", result.slot.addr)
+			}
+		} else if result.ok {
 			ready++
-			log.Printf("[兜底+] %s (%dms)", result.slot.addr, result.latency.Milliseconds())
 		}
 	}
 	log.Printf("[兜底] %d/%d custom proxies ready", ready, len(parsed))
