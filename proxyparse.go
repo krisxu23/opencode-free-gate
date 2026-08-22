@@ -63,16 +63,12 @@ func ParseProxyInput(raw string) ([]string, []proxyParseError) {
 }
 
 var unsupportedProxySchemes = map[string]string{
-	"ss":        "Shadowsocks",
-	"vmess":     "VMess",
-	"vless":     "VLESS",
-	"trojan":    "Trojan",
-	"hysteria":  "Hysteria",
-	"hysteria2": "Hysteria2",
-	"anytls":    "AnyTLS",
-	"tuic":      "TUIC",
+	"hysteria": "Hysteria(v1)",
+	"anytls":   "AnyTLS",
 }
 
+// advancedSchemes 在 advparse.go 中定义：这些协议经内嵌 sing-box 转换为本地
+// SOCKS5 端点后使用，链接本身原样保留在配置里。
 func normalizeProxyLine(line string) (string, error) {
 	line = strings.TrimSpace(line)
 	if i := strings.Index(line, "#"); i >= 0 {
@@ -81,7 +77,7 @@ func normalizeProxyLine(line string) (string, error) {
 	line = strings.TrimSpace(line)
 	schemeEnd := strings.Index(line, "://")
 	if schemeEnd <= 0 {
-		return "", fmt.Errorf("缺少协议前缀（应为 http(s)://、socks5:// 或 socks://）")
+		return "", fmt.Errorf("缺少协议前缀（应为 http(s)://、socks5:// 或分享链接）")
 	}
 	scheme := strings.ToLower(line[:schemeEnd])
 	switch scheme {
@@ -100,8 +96,20 @@ func normalizeProxyLine(line string) (string, error) {
 	case "socks":
 		return convertSharedSOCKS(line)
 	default:
+		if kind, ok := isAdvancedScheme(scheme); ok {
+			// 校验能解析；返回原始链接（保留 # 名称会被 splitProxyInput 截掉，
+			// 这里补回名称以便展示）。
+			full := line
+			if i := strings.Index(line, "#"); i >= 0 {
+				full = line
+			}
+			if _, err := parseAdvancedNode(full); err != nil {
+				return "", fmt.Errorf("%s 链接无效: %w", strings.ToUpper(kind), err)
+			}
+			return full, nil
+		}
 		if label, known := unsupportedProxySchemes[scheme]; known {
-			return "", fmt.Errorf("%s 协议不支持（请先用代理客户端转为本地 socks5 再填入）", label)
+			return "", fmt.Errorf("%s 协议暂不支持", label)
 		}
 		return "", fmt.Errorf("不支持的协议 %q", scheme)
 	}

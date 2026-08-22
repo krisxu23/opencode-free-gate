@@ -88,6 +88,8 @@ type gateway struct {
 
 	manualMu    sync.RWMutex
 	manualAddrs map[string]struct{}
+
+	advBridge *advancedBridge // 内嵌 sing-box：高级协议 → 本地 socks 端口
 }
 
 func newGateway(cfg config) *gateway {
@@ -273,7 +275,15 @@ func (g *gateway) fillSlots(ctx context.Context) error {
 	return nil
 }
 
+// Close 释放内嵌 sing-box 等后台资源（进程退出时系统也会回收）。
+func (g *gateway) Close() {
+	g.advBridge.Close()
+}
+
 func (g *gateway) initCustomSlots(ctx context.Context) error {
+	// 高级协议链接（vless/vmess/trojan/ss/hysteria2/tuic）先交给内嵌
+	// sing-box 转成本地 socks5 端点，再与普通节点一起走原有流程。
+	g.advBridge = g.startAdvancedBridgeFrom(g.cfg.customProxies)
 	parsed := parseCustomProxies(g.cfg.customProxies)
 	if len(parsed) == 0 {
 		return nil
@@ -321,13 +331,70 @@ func (g *gateway) initCustomSlots(ctx context.Context) error {
 	return nil
 }
 
-func parseCustomProxies(raw string) []slot {
+// startAdvancedBridgeFrom 从配置文本里收集高级协议链接并启动 sing-box 桥接。
+func (g *gateway) startAdvancedBridgeFrom(raw string) *advancedBridge {
+	parts := strings.Split(raw, ",")
+	var items []advancedItem
+	seen := make(map[string]struct{})
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		schemeEnd := strings.Index(part, "://")
+		if schemeEnd <= 0 {
+			continue
+		}
+		kind, ok := isAdvancedScheme(part[:schemeEnd])
+		if !ok {
+			continue
+		}
+		if _, dup := seen[part]; dup {
+			continue
+		}
+		node, err := parseAdvancedNode(part)
+		if err != nil {
+			log.Printf("[高级] 忽略 %s 链接: %v", strings.ToUpper(kind), err)
+			continue
+		}
+		seen[part] = struct{}{}
+		items = append(items, advancedItem{link: part, node: *node})
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	bridge, err := startAdvancedBridge(items)
+	if err != nil {
+		log.Printf("[高级] 内嵌 sing-box 启动失败，高级节点本次不可用: %v", err)
+		return nil
+	}
+	log.Printf("[高级] 内嵌 sing-box 已就绪：%d 个节点映射到本地端口 %d+", len(items), advancedBasePort)
+	return bridge
+}
+
+func (g *gateway) parseCustomProxies(raw string) []slot {
 	parts := strings.Split(raw, ",")
 	result := make([]slot, 0, len(parts))
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
+		}
+		if schemeEnd := strings.Index(part, "://"); schemeEnd > 0 {
+			if _, adv := isAdvancedScheme(part[:schemeEnd]); adv {
+				local, ok := g.advBridge.Links[part]
+				if !ok {
+					log.Printf("[配置] 高级节点暂不可用: %s", redactProxy(part))
+					continue
+				}
+				s, err := slotFromRawURL("socks5://" + local)
+				if err != nil {
+					log.Printf("[配置] 本地桥接地址无效: %v", err)
+					continue
+				}
+				result = append(result, s)
+				continue
+			}
 		}
 		s, err := slotFromRawURL(part)
 		if err != nil {
