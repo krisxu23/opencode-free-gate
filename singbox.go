@@ -145,6 +145,12 @@ func (g *gateway) ensureAdvancedBridge(ctx context.Context, freshLinks []string)
 	}
 	if len(all) > maxAdvancedNodes {
 		all = sampleStrings(all, maxAdvancedNodes)
+		// advSeen 只登记真正进入桥接的链接：被抽样丢掉的保留「未知」身份，
+		// 否则它们会被当成已处理而永远没有机会入选。
+		seenSet = make(map[string]struct{}, len(all))
+		for _, link := range all {
+			seenSet[link] = struct{}{}
+		}
 	}
 
 	items := make([]advancedItem, 0, len(all))

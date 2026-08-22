@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -31,8 +33,10 @@ func main() {
 
 	settingsPath := configPath()
 	settings := loadSettings(settingsPath)
+	// config.json 在 GUI 与控制台两种模式下都生效（行为一致）；
+	// 已显式导出的环境变量仍然优先，不会被配置文件覆盖。
+	settings.applyEnv()
 	if gui {
-		settings.applyEnv()
 		log.SetOutput(uiLog)
 		log.Printf("[启动] 界面模式已激活，日志缓冲就绪")
 	}
@@ -46,7 +50,7 @@ func main() {
 	gw.start(rootContext)
 
 	server := &http.Server{
-		Addr:              fmt.Sprintf(":%d", cfg.port),
+		Addr:              net.JoinHostPort(cfg.listenAddr, strconv.Itoa(cfg.port)),
 		Handler:           handler,
 		ReadHeaderTimeout: cfg.hardTimeout,
 		ReadTimeout:       cfg.hardTimeout,
@@ -57,7 +61,7 @@ func main() {
 	logStartup(cfg)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- server.ListenAndServe()
+		errCh <- listenAndServeWithRetry(server)
 	}()
 
 	if gui {
@@ -92,6 +96,20 @@ func main() {
 	if err := server.Shutdown(shutdownContext); err != nil {
 		log.Printf("[门] graceful shutdown failed: %v", err)
 		_ = server.Close()
+	}
+}
+
+// listenAndServeWithRetry 处理「保存并重启」的端口竞争：旧进程释放端口可能比
+// 新进程绑定更慢，端口被占用（EADDRINUSE）期间短暂重试，而不是直接失败退出。
+func listenAndServeWithRetry(server *http.Server) error {
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		err := server.ListenAndServe()
+		if !errors.Is(err, syscall.EADDRINUSE) || time.Now().After(deadline) {
+			return err
+		}
+		log.Printf("[门] 端口暂被占用（旧进程退出中），稍后重试: %v", err)
+		time.Sleep(300 * time.Millisecond)
 	}
 }
 
@@ -181,11 +199,10 @@ func (a *app) authorized(r *http.Request) bool {
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
 		return false
 	}
-	token := parts[1]
-	if len(token) != len(a.gateway.cfg.gatewayKey) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(token), []byte(a.gateway.cfg.gatewayKey)) == 1
+	// 先各自哈希再常量时间比较，避免长度差异提前泄露信息。
+	tokenDigest := sha256.Sum256([]byte(parts[1]))
+	keyDigest := sha256.Sum256([]byte(a.gateway.cfg.gatewayKey))
+	return subtle.ConstantTimeCompare(tokenDigest[:], keyDigest[:]) == 1
 }
 
 func normalizePath(project projectSpec, raw string) (string, bool) {
@@ -431,12 +448,11 @@ func streamResponse(w http.ResponseWriter, ctx context.Context, live *liveRespon
 		flusher.Flush()
 	}
 	buffer := make([]byte, 32<<10)
+	// 复用单个计时器实现空闲超时：到点取消上游请求，阻塞中的 Read 随之返回。
+	timer := time.AfterFunc(idle, live.cancel)
+	defer timer.Stop()
 	for {
-		idleElapsed := make(chan struct{})
-		timer := time.AfterFunc(idle, func() {
-			close(idleElapsed)
-			live.cancel()
-		})
+		timer.Reset(idle)
 		n, err := live.response.Body.Read(buffer)
 		stopped := timer.Stop()
 		if n > 0 {
@@ -448,7 +464,6 @@ func streamResponse(w http.ResponseWriter, ctx context.Context, live *liveRespon
 			}
 		}
 		if !stopped {
-			<-idleElapsed
 			log.Printf("[流] %s 内无数据，已关闭连接", idle)
 			return
 		}

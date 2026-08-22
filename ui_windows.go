@@ -41,6 +41,7 @@ type gatewayUI struct {
 	modelsSeen   string
 	shownText    string
 	poolLiveText string
+	statusText   string
 	shutdownOnce func()
 }
 
@@ -339,8 +340,14 @@ func (ui *gatewayUI) refreshStatus() {
 		sources := parsePoolSources(ui.settings.PoolInput)
 		poolInfo = fmt.Sprintf("     节点池 %d 源自动探活", len(sources))
 	}
-	ui.statusLabel.SetText(fmt.Sprintf("● 运行中     端口 %d     %s%s     上游 %d 个轮换",
-		gw.cfg.port, mode, poolInfo, len(gw.cfg.upstreamPool())))
+	text := fmt.Sprintf("● 运行中     端口 %d     %s%s     上游 %d 个轮换",
+		gw.cfg.port, mode, poolInfo, len(gw.cfg.upstreamPool()))
+	// 内容没变化就不重绘，避免高频 SetText 打扰 UI 线程。
+	if text == ui.statusText {
+		return
+	}
+	ui.statusText = text
+	ui.statusLabel.SetText(text)
 }
 
 // modelWatcher 后台定时拉取模型列表并同步到界面。

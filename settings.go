@@ -109,13 +109,18 @@ func (s uiSettings) normalized() uiSettings {
 	return s
 }
 
-// save 以缩进 JSON 写入配置文件。
+// save 以缩进 JSON 写入配置文件；先写临时文件再原子替换，
+// 避免写入中途断电/崩溃留下半截配置。
 func (s uiSettings) save(path string) error {
 	data, err := json.MarshalIndent(s.normalized(), "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0o644)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(data, '\n'), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // applyEnv 把配置转换为环境变量；已显式设置的环境变量优先，不被覆盖。

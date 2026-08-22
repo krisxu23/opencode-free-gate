@@ -18,6 +18,7 @@ const (
 type config struct {
 	project          projectSpec
 	port             int
+	listenAddr       string // 监听地址；默认仅本机，设 0.0.0.0 可供局域网访问
 	proxyAPI         string
 	proxyMode        string
 	proxyOrder       []string
@@ -42,7 +43,12 @@ type config struct {
 	raceWidth        int  // 竞速中自动节点最多同时尝试几路（手动节点始终全上）
 }
 
+// upstreamTLSInsecure 由 INSECURE_TLS 控制：置 1 时上游连接跳过证书校验
+// （兼容自签证书的镜像/代理环境），默认严格校验。
+var upstreamTLSInsecure bool
+
 func loadConfig(project projectSpec) config {
+	upstreamTLSInsecure = envIsOn(os.Getenv("INSECURE_TLS"))
 	mode := strings.ToLower(strings.TrimSpace(os.Getenv("PROXY_MODE")))
 	if mode != "custom" {
 		mode = "auto"
@@ -59,6 +65,7 @@ func loadConfig(project projectSpec) config {
 	return config{
 		project:          project,
 		port:             envInt("PORT", 13339),
+		listenAddr:       envString("LISTEN_ADDR", "127.0.0.1"),
 		proxyAPI:         "https://proxy.amux.ai/api/proxies",
 		proxyMode:        mode,
 		proxyOrder:       parseProxyOrder(os.Getenv("PROXY_ORDER")),
@@ -73,13 +80,13 @@ func loadConfig(project projectSpec) config {
 		zenKey:           os.Getenv("ZENPROXY_KEY"),
 		forceRelay:       os.Getenv("FORCE_RELAY") == "1",
 		gatewayKey:       os.Getenv("GATEWAY_KEY"),
-		firstByteTimeout: envMilliseconds("PROXY_FIRST_BYTE_TIMEOUT", 3000),
-		hardTimeout:      envMilliseconds("HARD_TIMEOUT", 10000),
+		firstByteTimeout: envMilliseconds("PROXY_FIRST_BYTE_TIMEOUT", 30000),
+		hardTimeout:      envMilliseconds("HARD_TIMEOUT", 180000),
 		nonStreamTimeout: envMilliseconds("NON_STREAM_TIMEOUT", 300000),
 		probeTimeout:     envMilliseconds("PROXY_PROBE_TIMEOUT", 8000),
 		refreshInterval:  envMilliseconds("PROXY_REFRESH_MS", 300000),
 		streamIdle:       300 * time.Second,
-		raceEnabled:      envIsOn(os.Getenv("PROXY_RACE")),
+		raceEnabled:      envIsOn(envString("PROXY_RACE", "1")),
 		raceWidth:        nonNegative(envInt("PROXY_RACE_WIDTH", 8)),
 	}
 }
@@ -115,7 +122,8 @@ func (c config) usesPublicPool() bool {
 	return false
 }
 
-func parseProxyOrder(raw string) []string {	raw = strings.TrimSpace(raw)
+func parseProxyOrder(raw string) []string {
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil
 	}

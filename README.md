@@ -107,20 +107,23 @@ https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt
 
 ## 配置
 
-设置在界面修改后「保存并重启」生效，持久化到 exe 同目录 `config.json`。环境变量优先级更高：
+设置在界面修改后「保存并重启」生效，持久化到 exe 同目录 `config.json`（控制台版同样读取该文件）。环境变量优先级更高：
 
 | 环境变量 | 默认 | 说明 |
 |---|---|---|
 | `PORT` | `13339` | 监听端口 |
+| `LISTEN_ADDR` | `127.0.0.1` | 监听地址；设为 `0.0.0.0` 可供局域网设备访问 |
 | `CUSTOM_PROXIES` | 空 | 逗号分隔的代理 URL / 分享链接 |
 | `MIRROR_URLS` | 空 | 上游镜像基址 |
 | `PROXY_LIST_URLS` | 空 | 节点池源链接 |
 | `PROXY_RACE` / `PROXY_RACE_WIDTH` | `1` / `8` | 竞速开关 / 自动节点最大并发路数 |
 | `PROXY_FIRST_BYTE_TIMEOUT` | `30000` | 流式首字节超时（毫秒） |
 | `HARD_TIMEOUT` | `180000` | 流式总预算（毫秒） |
-| `PROXY_ORDER` | 空 | 回退顺序；GUI 自动设为 `custom` 或 `direct` |
+| `PROXY_ORDER` | 空 | 回退顺序；由 config.json 自动设为 `custom` 或 `direct` |
+| `INSECURE_TLS` | `0` | 置 `1` 跳过上游 TLS 证书校验（自签证书的镜像/代理环境用） |
 
-> 「保存并重启」会剔除以上变量后重启进程，以 config.json 为准；仅显式设置的变量优先。
+> 默认仅监听本机（127.0.0.1）。上游证书默认严格校验，仅自签证书环境需要 `INSECURE_TLS=1`。
+> 「保存并重启」会剔除上表由 config.json 派生的变量后重启进程；`LISTEN_ADDR`、`INSECURE_TLS` 等显式设置的环境变量不受影响。
 
 ## 构建
 

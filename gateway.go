@@ -155,6 +155,20 @@ func (g *gateway) start(ctx context.Context) {
 			}
 		}()
 	}
+
+	// 定期回收共享连接池里闲置的条目（代理下线后旧连接自然空闲超时）。
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				sharedTransports.sweep(2 * time.Minute)
+			}
+		}
+	}()
 }
 
 func (g *gateway) refresh(ctx context.Context) {
@@ -635,10 +649,9 @@ type gatewayResponse struct {
 }
 
 type liveResponse struct {
-	response  *http.Response
-	cancel    context.CancelFunc
-	transport *http.Transport
-	once      sync.Once
+	response *http.Response
+	cancel   context.CancelFunc
+	once     sync.Once
 }
 
 func (r *liveResponse) Close() {
@@ -650,7 +663,6 @@ func (r *liveResponse) Close() {
 			_ = r.response.Body.Close()
 		}
 		r.cancel()
-		r.transport.CloseIdleConnections()
 	})
 }
 
@@ -722,7 +734,9 @@ func openHTTP(ctx context.Context, method, target string, headers http.Header, b
 		cancel()
 	})
 
-	transport := requestTransport(proxyURL, connectTimeout, responseHeaderTimeout)
+	// Transport 由共享连接池按「代理+超时」复用，连接不再逐请求重建；
+	// 归还与回收由 transportpool 管理，这里不做 CloseIdleConnections。
+	transport := sharedTransports.get(proxyURL, connectTimeout, responseHeaderTimeout)
 	client := &http.Client{
 		Transport: transport,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
@@ -734,7 +748,6 @@ func openHTTP(ctx context.Context, method, target string, headers http.Header, b
 	if err != nil {
 		timer.Stop()
 		cancel()
-		transport.CloseIdleConnections()
 		return nil, err
 	}
 	req.Header = headers.Clone()
@@ -745,7 +758,6 @@ func openHTTP(ctx context.Context, method, target string, headers http.Header, b
 	stopped := timer.Stop()
 	if err != nil {
 		cancel()
-		transport.CloseIdleConnections()
 		select {
 		case <-timedOut:
 			return nil, errAttemptTimeout
@@ -760,28 +772,30 @@ func openHTTP(ctx context.Context, method, target string, headers http.Header, b
 		<-timedOut
 		_ = res.Body.Close()
 		cancel()
-		transport.CloseIdleConnections()
 		return nil, errAttemptTimeout
 	}
-	return &liveResponse{response: res, cancel: cancel, transport: transport}, nil
+	return &liveResponse{response: res, cancel: cancel}, nil
 }
 
 func requestTransport(proxyURL *url.URL, connectTimeout, responseHeaderTimeout time.Duration) *http.Transport {
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   connectTimeout,
-			KeepAlive: -1,
+			KeepAlive: 30 * time.Second,
 		}).DialContext,
 		ForceAttemptHTTP2:      false,
-		DisableKeepAlives:      true,
 		DisableCompression:     true,
+		MaxIdleConns:           128,
+		MaxIdleConnsPerHost:    4,
+		IdleConnTimeout:        90 * time.Second,
 		TLSHandshakeTimeout:    connectTimeout,
 		ResponseHeaderTimeout:  responseHeaderTimeout,
 		ExpectContinueTimeout:  time.Second,
 		MaxResponseHeaderBytes: 1 << 20,
 		TLSClientConfig: &tls.Config{
 			MinVersion:         tls.VersionTLS12,
-			InsecureSkipVerify: true, // 保持旧网关行为；上游与代理链可能使用非标准证书。
+			// INSECURE_TLS=1 时放行非标证书（自签镜像/代理环境），默认严格校验。
+			InsecureSkipVerify: upstreamTLSInsecure,
 		},
 	}
 	if proxyURL != nil {
