@@ -341,7 +341,7 @@ func parsePoolText(out *[]slot, advanced *[]string, seen map[string]struct{}, te
 		if schemeEnd := strings.Index(line, "://"); schemeEnd > 0 {
 			if _, isAdv := isAdvancedScheme(line[:schemeEnd]); isAdv {
 				if _, err := parseAdvancedNode(line); err == nil {
-					count += len(appendAdvanced(advanced, seen, line)...)
+					count += len(appendAdvanced(advanced, seen, line))
 				}
 				continue
 			}

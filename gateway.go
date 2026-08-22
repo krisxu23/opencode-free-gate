@@ -368,8 +368,7 @@ func collectAdvancedLinks(raw string) []string {
 		if _, dup := seen[part]; dup {
 			continue
 		}
-		node, err := parseAdvancedNode(part)
-		if err != nil {
+		if _, err := parseAdvancedNode(part); err != nil {
 			log.Printf("[高级] 忽略 %s 链接: %v", strings.ToUpper(strings.SplitN(part, ":", 2)[0]), err)
 			continue
 		}
