@@ -987,7 +987,9 @@ func (g *gateway) dispatchRace(ctx context.Context, request upstreamRequest, tra
 		err     error
 	}
 	raceCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	// 关键：胜出/兜底路径会把仍挂着数据流的响应交给调用方（流式响应的 body
+	// 就活在 raceCtx 的取消链上），所以这两条路径绝不能触发 cancel，
+	// 否则赢家刚返回流就被掐断，客户端表现为 Connection error。
 	results := make(chan raceResult, len(exits)+1)
 
 	const directAddr = "直连"
@@ -1019,6 +1021,7 @@ func (g *gateway) dispatchRace(ctx context.Context, request upstreamRequest, tra
 				g.noteCustomResult(res.addr, false)
 			}
 			if ctx.Err() != nil {
+				cancel()
 				return nil, res.err
 			}
 			continue
@@ -1033,8 +1036,8 @@ func (g *gateway) dispatchRace(ctx context.Context, request upstreamRequest, tra
 			}
 			continue
 		}
-		// 赢家出现：取消其余在途请求，并异步收割迟到的响应防止连接泄漏。
-		cancel()
+		// 赢家出现。不 cancel：在途败者等它们自己的首字节超时自然退场，
+		// 由下面的收割协程负责关闭迟到响应的连接，防止泄漏。
 		if last != nil {
 			last.live.Close()
 			last = nil
@@ -1045,7 +1048,7 @@ func (g *gateway) dispatchRace(ctx context.Context, request upstreamRequest, tra
 		log.Printf("[竞速] 胜出: %s", res.addr)
 		trace.finalProxy = res.addr
 		go func() {
-			deadline := time.After(10 * time.Second)
+			deadline := time.After(40 * time.Second) // 覆盖最长的首字节超时窗口
 			for {
 				select {
 				case extra := <-results:
@@ -1064,6 +1067,7 @@ func (g *gateway) dispatchRace(ctx context.Context, request upstreamRequest, tra
 		trace.finalProxy = lastAddr
 		return last, nil
 	}
+	cancel()
 	return nil, errNoProxy
 }
 
