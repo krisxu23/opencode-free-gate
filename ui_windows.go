@@ -65,142 +65,165 @@ func runGatewayUI(handler *app, settings uiSettings, path string, shutdown func(
 		AssignTo: &ui.window,
 		Title:    "opencode-free-gate",
 		Icon:     appIcon,
-		MinSize:  dcl.Size{Width: 760, Height: 640},
-		Size:     dcl.Size{Width: 820, Height: 720},
+		MinSize:  dcl.Size{Width: 760, Height: 460},
+		Size:     dcl.Size{Width: 820, Height: 560},
 		Layout:   dcl.VBox{},
 		Children: []dcl.Widget{
-			dcl.GroupBox{
-				Title:  "运行状态",
-				Layout: dcl.Grid{Columns: 3},
-				Children: []dcl.Widget{
-					dcl.Label{AssignTo: &ui.statusLabel, Text: "● 启动中…", ColumnSpan: 3},
-
-					dcl.Label{Text: "API 地址:"},
-					dcl.LineEdit{AssignTo: &ui.apiEdit, Text: apiBase, ReadOnly: true},
-					dcl.PushButton{Text: "复制", MaxSize: dcl.Size{Width: 80}, OnClicked: func() {
-						ui.copyText(ui.apiEdit.Text(), "API 地址")
-					}},
-
-					dcl.Label{Text: "默认 Key:"},
-					dcl.LineEdit{AssignTo: &ui.keyEdit, Text: settings.GatewayKey, ReadOnly: true},
-					dcl.PushButton{Text: "复制", MaxSize: dcl.Size{Width: 80}, OnClicked: func() {
-						ui.copyText(ui.keyEdit.Text(), "默认 Key")
-					}},
-
-					dcl.Label{
-						Text:       "Key 填任意非空字符串均可通过（当前未启用校验）。Anthropic 客户端把地址末尾换成 /anthropic/v1。",
-						ColumnSpan: 3,
-					},
-				},
-			},
-
-			dcl.GroupBox{
-				Title:  "实时免费模型（上游拉取，可直接复制）",
-				Layout: dcl.VBox{},
-				Children: []dcl.Widget{
-					dcl.TextEdit{
-						AssignTo: &ui.modelsEdit,
-						ReadOnly: true,
-						VScroll:  true,
-						MinSize:  dcl.Size{Height: 96},
-						Text:     "正在获取…",
-					},
-					dcl.Composite{
-						Layout: dcl.HBox{MarginsZero: true},
+			dcl.TabWidget{
+				Pages: []dcl.TabPage{
+					{
+						Title:  "运行状态",
+						Layout: dcl.VBox{},
 						Children: []dcl.Widget{
-							dcl.PushButton{Text: "复制全部模型名", OnClicked: func() {
-								ui.copyText(ui.modelsEdit.Text(), "模型列表")
-							}},
-							dcl.HSpacer{},
-						},
-					},
-				},
-			},
+							dcl.GroupBox{
+								Title:  "运行状态",
+								Layout: dcl.Grid{Columns: 3},
+								Children: []dcl.Widget{
+									dcl.Label{AssignTo: &ui.statusLabel, Text: "● 启动中…", ColumnSpan: 3},
 
-			dcl.GroupBox{
-				Title:  "在线节点池",
-				Layout: dcl.VBox{},
-				Children: []dcl.Widget{
-					dcl.CheckBox{
-						AssignTo: &ui.poolCheck,
-						Text:     "自动拉取在线节点并探活（每轮用真实 opencode.ai 请求测活，健康节点实时入池、失效自动移除，无需重启）",
-						Checked:  settings.PoolEnabled,
-					},
-					dcl.Label{Text: "节点源链接（一行一个；支持 socks5 文本列表与 amux JSON，github 页面链接自动转 raw）:"},
-					dcl.TextEdit{
-						AssignTo: &ui.poolEdit,
-						Text:     settings.PoolInput,
-						VScroll:  true,
-						MinSize:  dcl.Size{Height: 64},
-					},
-					dcl.Label{Text: "实时在线节点（探活通过自动加入，失败自动移除，无需重启）:"},
-					dcl.TextEdit{
-						AssignTo: &ui.poolLive,
-						ReadOnly: true,
-						VScroll:  true,
-						MinSize:  dcl.Size{Height: 72},
-					},
-				},
-			},
+									dcl.Label{Text: "API 地址:"},
+									dcl.LineEdit{AssignTo: &ui.apiEdit, Text: apiBase, ReadOnly: true},
+									dcl.PushButton{Text: "复制", MaxSize: dcl.Size{Width: 80}, OnClicked: func() {
+										ui.copyText(ui.apiEdit.Text(), "API 地址")
+									}},
 
-			dcl.GroupBox{
-				Title:  "设置",
-				Layout: dcl.VBox{},
-				Children: []dcl.Widget{
-					dcl.Composite{
-						Layout: dcl.HBox{MarginsZero: true},
-						Children: []dcl.Widget{
-							dcl.Label{Text: "出站模式:"},
-							dcl.ComboBox{
-								AssignTo:     &ui.outboundBox,
-								Model:        outboundChoices,
-								CurrentIndex: outboundIndex,
-								MinSize:      dcl.Size{Width: 220},
+									dcl.Label{Text: "默认 Key:"},
+									dcl.LineEdit{AssignTo: &ui.keyEdit, Text: settings.GatewayKey, ReadOnly: true},
+									dcl.PushButton{Text: "复制", MaxSize: dcl.Size{Width: 80}, OnClicked: func() {
+										ui.copyText(ui.keyEdit.Text(), "默认 Key")
+									}},
+
+									dcl.Label{
+										Text:       "Key 填任意非空字符串均可通过（当前未启用校验）。Anthropic 客户端把地址末尾换成 /anthropic/v1。",
+										ColumnSpan: 3,
+									},
+								},
 							},
-							dcl.HSpacer{},
-							dcl.Label{Text: "首字节超时"},
-							dcl.NumberEdit{AssignTo: &ui.firstByte, Value: float64(settings.FirstByteSeconds), MinValue: 3, MaxValue: 600, Decimals: 0, MaxSize: dcl.Size{Width: 70}},
-							dcl.Label{Text: "秒     总预算"},
-							dcl.NumberEdit{AssignTo: &ui.budget, Value: float64(settings.BudgetSeconds), MinValue: 5, MaxValue: 1800, Decimals: 0, MaxSize: dcl.Size{Width: 80}},
-							dcl.Label{Text: "秒"},
-						},
-					},
-					dcl.Label{Text: "代理节点（一行一个，支持 http/https/socks5 及 socks:// 分享链接）:"},
-					dcl.TextEdit{
-						AssignTo: &ui.proxyEdit,
-						Text:     settings.ProxyInput,
-						VScroll:  true,
-						MinSize:  dcl.Size{Height: 84},
-					},
-					dcl.Label{Text: "上游镜像（一行一个，请求间轮换；留空只用 opencode.ai）:"},
-					dcl.TextEdit{
-						AssignTo: &ui.mirrorEdit,
-						Text:     settings.MirrorInput,
-						VScroll:  true,
-						MinSize:  dcl.Size{Height: 64},
-					},
-					dcl.Composite{
-						Layout: dcl.HBox{MarginsZero: true},
-						Children: []dcl.Widget{
-							dcl.PushButton{Text: "保存并重启", OnClicked: ui.onSave},
-							dcl.PushButton{Text: "仅检查格式", OnClicked: ui.onValidate},
-							dcl.PushButton{Text: "打开配置目录", OnClicked: ui.onOpenFolder},
-							dcl.HSpacer{},
-						},
-					},
-				},
-			},
 
-			dcl.GroupBox{
-				Title:  "实时日志",
-				Layout: dcl.VBox{},
-				Children: []dcl.Widget{
-					dcl.TextEdit{
-						AssignTo: &ui.logEdit,
-						ReadOnly: true,
-						VScroll:  true,
-						HScroll:  true,
-						MinSize:  dcl.Size{Height: 210},
+							dcl.GroupBox{
+								Title:  "实时免费模型（上游拉取，可直接复制）",
+								Layout: dcl.VBox{},
+								Children: []dcl.Widget{
+									dcl.TextEdit{
+										AssignTo: &ui.modelsEdit,
+										ReadOnly: true,
+										VScroll:  true,
+										MinSize:  dcl.Size{Height: 96},
+										Text:     "正在获取…",
+									},
+									dcl.Composite{
+										Layout: dcl.HBox{MarginsZero: true},
+										Children: []dcl.Widget{
+											dcl.PushButton{Text: "复制全部模型名", OnClicked: func() {
+												ui.copyText(ui.modelsEdit.Text(), "模型列表")
+											}},
+											dcl.HSpacer{},
+										},
+									},
+								},
+							},
+
+							dcl.GroupBox{
+								Title:  "实时在线节点",
+								Layout: dcl.VBox{},
+								Children: []dcl.Widget{
+									dcl.Label{Text: "探活通过自动加入、失效自动移除；手动节点永不自动移除:"},
+									dcl.TextEdit{
+										AssignTo: &ui.poolLive,
+										ReadOnly: true,
+										VScroll:  true,
+										MinSize:  dcl.Size{Height: 120},
+									},
+								},
+							},
+						},
+					},
+
+					{
+						Title:  "设置",
+						Layout: dcl.VBox{},
+						Children: []dcl.Widget{
+							dcl.GroupBox{
+								Title:  "出站与超时",
+								Layout: dcl.VBox{},
+								Children: []dcl.Widget{
+									dcl.Composite{
+										Layout: dcl.HBox{MarginsZero: true},
+										Children: []dcl.Widget{
+											dcl.Label{Text: "出站模式:"},
+											dcl.ComboBox{
+												AssignTo:     &ui.outboundBox,
+												Model:        outboundChoices,
+												CurrentIndex: outboundIndex,
+												MinSize:      dcl.Size{Width: 220},
+											},
+											dcl.HSpacer{},
+											dcl.Label{Text: "首字节超时"},
+											dcl.NumberEdit{AssignTo: &ui.firstByte, Value: float64(settings.FirstByteSeconds), MinValue: 3, MaxValue: 600, Decimals: 0, MaxSize: dcl.Size{Width: 70}},
+											dcl.Label{Text: "秒     总预算"},
+											dcl.NumberEdit{AssignTo: &ui.budget, Value: float64(settings.BudgetSeconds), MinValue: 5, MaxValue: 1800, Decimals: 0, MaxSize: dcl.Size{Width: 80}},
+											dcl.Label{Text: "秒"},
+										},
+									},
+									dcl.Label{Text: "代理节点（一行一个，支持 http/https/socks5 及 socks:// 分享链接；手动节点不会被自动程序删除）:"},
+									dcl.TextEdit{
+										AssignTo: &ui.proxyEdit,
+										Text:     settings.ProxyInput,
+										VScroll:  true,
+										MinSize:  dcl.Size{Height: 96},
+									},
+									dcl.Label{Text: "上游镜像（一行一个，请求间轮换；留空只用 opencode.ai）:"},
+									dcl.TextEdit{
+										AssignTo: &ui.mirrorEdit,
+										Text:     settings.MirrorInput,
+										VScroll:  true,
+										MinSize:  dcl.Size{Height: 64},
+									},
+									dcl.Composite{
+										Layout: dcl.HBox{MarginsZero: true},
+										Children: []dcl.Widget{
+											dcl.PushButton{Text: "保存并重启", OnClicked: ui.onSave},
+											dcl.PushButton{Text: "仅检查格式", OnClicked: ui.onValidate},
+											dcl.PushButton{Text: "打开配置目录", OnClicked: ui.onOpenFolder},
+											dcl.HSpacer{},
+										},
+									},
+								},
+							},
+
+							dcl.GroupBox{
+								Title:  "在线节点池",
+								Layout: dcl.VBox{},
+								Children: []dcl.Widget{
+									dcl.CheckBox{
+										AssignTo: &ui.poolCheck,
+										Text:     "自动拉取在线节点并探活（每轮用真实 opencode.ai 请求测活，健康节点实时入池、失效自动移除，无需重启）",
+										Checked:  settings.PoolEnabled,
+									},
+									dcl.Label{Text: "节点源链接（一行一个；支持 socks5 文本列表与 amux JSON，github 页面链接自动转 raw）:"},
+									dcl.TextEdit{
+										AssignTo: &ui.poolEdit,
+										Text:     settings.PoolInput,
+										VScroll:  true,
+										MinSize:  dcl.Size{Height: 96},
+									},
+								},
+							},
+						},
+					},
+
+					{
+						Title:  "实时日志",
+						Layout: dcl.VBox{},
+						Children: []dcl.Widget{
+							dcl.TextEdit{
+								AssignTo: &ui.logEdit,
+								ReadOnly: true,
+								VScroll:  true,
+								HScroll:  true,
+								MinSize:  dcl.Size{Height: 320},
+							},
+						},
 					},
 				},
 			},
