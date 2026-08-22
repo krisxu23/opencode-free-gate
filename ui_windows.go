@@ -30,6 +30,7 @@ type gatewayUI struct {
 	mirrorEdit   *walk.TextEdit
 	poolCheck    *walk.CheckBox
 	poolEdit     *walk.TextEdit
+	poolLive     *walk.TextEdit
 	apiEdit      *walk.LineEdit
 	keyEdit      *walk.LineEdit
 	firstByte    *walk.NumberEdit
@@ -38,6 +39,7 @@ type gatewayUI struct {
 	logCursor    int
 	modelsSeen   string
 	shownText    string
+	poolLiveText string
 	shutdownOnce func()
 }
 
@@ -130,6 +132,13 @@ func runGatewayUI(handler *app, settings uiSettings, path string, shutdown func(
 						Text:     settings.PoolInput,
 						VScroll:  true,
 						MinSize:  dcl.Size{Height: 64},
+					},
+					dcl.Label{Text: "实时在线节点（探活通过自动加入，失败自动移除，无需重启）:"},
+					dcl.TextEdit{
+						AssignTo: &ui.poolLive,
+						ReadOnly: true,
+						VScroll:  true,
+						MinSize:  dcl.Size{Height: 72},
 					},
 				},
 			},
@@ -236,6 +245,26 @@ func runGatewayUI(handler *app, settings uiSettings, path string, shutdown func(
 func (ui *gatewayUI) tick() {
 	ui.pumpLogs()
 	ui.refreshStatus()
+	ui.refreshPoolLive()
+}
+
+// refreshPoolLive 把当前节点池明细同步到界面；内容没变化就不重绘，几乎零开销。
+func (ui *gatewayUI) refreshPoolLive() {
+	if ui.poolLive == nil {
+		return
+	}
+	addrs := ui.app.gateway.slotAddresses(true)
+	var text string
+	if len(addrs) == 0 {
+		text = "（暂无在线节点，等待探活…）"
+	} else {
+		text = fmt.Sprintf("共 %d 个：\r\n%s", len(addrs), strings.Join(addrs, "\r\n"))
+	}
+	if text == ui.poolLiveText {
+		return
+	}
+	ui.poolLiveText = text
+	ui.poolLive.SetText(text)
 }
 
 func (ui *gatewayUI) pumpLogs() {
