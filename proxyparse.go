@@ -97,16 +97,11 @@ func normalizeProxyLine(line string) (string, error) {
 		return convertSharedSOCKS(line)
 	default:
 		if kind, ok := isAdvancedScheme(scheme); ok {
-			// 校验能解析；返回原始链接（保留 # 名称会被 splitProxyInput 截掉，
-			// 这里补回名称以便展示）。
-			full := line
-			if i := strings.Index(line, "#"); i >= 0 {
-				full = line
-			}
-			if _, err := parseAdvancedNode(full); err != nil {
+			// 校验可解析，链接原样保留：启动时由内嵌 sing-box 转成本地 socks 端口。
+			if _, err := parseAdvancedNode(line); err != nil {
 				return "", fmt.Errorf("%s 链接无效: %w", strings.ToUpper(kind), err)
 			}
-			return full, nil
+			return line, nil
 		}
 		if label, known := unsupportedProxySchemes[scheme]; known {
 			return "", fmt.Errorf("%s 协议暂不支持", label)

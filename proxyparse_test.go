@@ -38,10 +38,10 @@ func TestParseProxyInputSharedSOCKSLink(t *testing.T) {
 
 func TestParseProxyInputRejectsUnsupportedAndInvalid(t *testing.T) {
 	input := strings.Join([]string{
-		"vless://uuid@example.com:443?type=ws",
+		"hysteria://key@1.2.3.4:443", // Hysteria v1 仍不支持
 		"socks5://127.0.0.1",
 		"not-a-url",
-		"hysteria2://key@1.2.3.4:443",
+		"vless://example.com:443", // 缺少 UUID
 	}, "\n")
 
 	good, bad := ParseProxyInput(input)
@@ -51,11 +51,23 @@ func TestParseProxyInputRejectsUnsupportedAndInvalid(t *testing.T) {
 	if len(bad) != 4 {
 		t.Fatalf("expected 4 errors, got %d: %v", len(bad), bad)
 	}
-	if !strings.Contains(bad[0].Error(), "VLESS") {
-		t.Fatalf("expected VLESS hint, got %q", bad[0].Error())
-	}
 	if !strings.Contains(bad[1].Error(), "端口") {
 		t.Fatalf("expected port hint, got %q", bad[1].Error())
+	}
+}
+
+// 高级协议链接（经内嵌 sing-box 支持）应被原样接受。
+func TestParseProxyInputAcceptsAdvancedLinks(t *testing.T) {
+	input := strings.Join([]string{
+		"vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?type=ws&security=tls",
+		"hysteria2://key@1.2.3.4:443",
+	}, "\n")
+	good, bad := ParseProxyInput(input)
+	if len(bad) != 0 {
+		t.Fatalf("unexpected errors: %v", bad)
+	}
+	if len(good) != 2 {
+		t.Fatalf("expected 2 advanced links, got %v", good)
 	}
 }
 

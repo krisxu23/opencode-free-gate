@@ -233,13 +233,16 @@ func parseSSLink(link string) (*advNode, error) {
 		if q := strings.Index(hostPart, "?"); q >= 0 {
 			hostPart = hostPart[:q]
 		}
-		methodPass, _, plainOK := decodeShareCredential(userInfo)
+		methodPass := userInfo
+		if decoded, err := decodeBase64Any(userInfo); err == nil && strings.Contains(decoded, ":") {
+			methodPass = decoded
+		}
 		method, pass := splitMethodPass(methodPass)
 		hostParsed, err := url.Parse("socks5://" + hostPart)
 		if err != nil || hostParsed.Port() == "" {
 			return nil, fmt.Errorf("ss 缺少主机或端口")
 		}
-		if (!plainOK && method == "") || hostParsed.Hostname() == "" {
+		if method == "" || pass == "" || hostParsed.Hostname() == "" {
 			return nil, fmt.Errorf("ss 凭据或地址无效")
 		}
 		port, _ := strconv.Atoi(hostParsed.Port())
